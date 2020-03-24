@@ -93,6 +93,7 @@ configure_file (
 # platform
 add_library(profinet "")
 add_executable(pn_dev "")
+add_executable(hist_io "")
 
 if (BUILD_TESTING)
   add_executable(pf_test "")
@@ -138,6 +139,7 @@ install (FILES
 
 add_subdirectory (src)
 add_subdirectory (sample_app)
+add_subdirectory (historian_io)
 
 if (BUILD_TESTING)
   add_subdirectory (test)

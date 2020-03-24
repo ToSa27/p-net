@@ -61,6 +61,16 @@ target_sources(pn_dev
   sample_app/main_linux.c
   )
 
+target_include_directories(hist_io
+  PRIVATE
+  src/osal/linux
+  )
+
+target_sources(hist_io
+  PRIVATE
+  historian_io/historian_io.c
+  )
+
 if (BUILD_TESTING)
   set(GOOGLE_TEST_INDIVIDUAL TRUE)
   target_sources(pf_test
