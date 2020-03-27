@@ -13,6 +13,8 @@
 #include "osal.h"
 #include "log.h"
 
+// #include <gperftools/profiler.h>
+
 /********************* Call-back function declarations ************************/
 
 static int app_exp_module_ind(uint16_t api, uint16_t slot, uint32_t module_ident_number);
@@ -38,12 +40,12 @@ static int app_alarm_ack_cnf(uint32_t arep, int res);
 #define EVENT_ABORT                    BIT(15)
 
 #define EXIT_CODE_ERROR                1
-#define TICK_INTERVAL_US               1000        /* 1 ms */
+#define TICK_INTERVAL_US               250         /* org 1000 */
 #define APP_DEFAULT_ETHERNET_INTERFACE "eth0"
-#define APP_PRIORITY                   15
+#define APP_PRIORITY                   15          /* org 15 */
 #define APP_STACKSIZE                  4096        /* bytes */
-#define APP_MAIN_SLEEPTIME_US          5000*1000
-#define PNET_MAX_OUTPUT_LEN            256
+#define APP_MAIN_SLEEPTIME_US          5*1000*1000
+#define PNET_MAX_OUTPUT_LEN            1440        /* org 256 */
 
 #define IP_INVALID                     0
 
@@ -89,9 +91,16 @@ typedef enum pnet_data_type_values
 {
    PNET_DATA_TYPE_NONE                       = 0,
    PNET_DATA_TYPE_BOOL                       = 1,
-   PNET_DATA_TYPE_UINT                       = 2,
-   PNET_DATA_TYPE_INT                        = 3,
-   PNET_DATA_TYPE_FLOAT                      = 4,
+   PNET_DATA_TYPE_UINT8                      = 2,
+   PNET_DATA_TYPE_UINT16                     = 3,
+   PNET_DATA_TYPE_UINT32                     = 4,
+   PNET_DATA_TYPE_UINT64                     = 5,
+   PNET_DATA_TYPE_INT8                       = 6,
+   PNET_DATA_TYPE_INT16                      = 7,
+   PNET_DATA_TYPE_INT32                      = 8,
+   PNET_DATA_TYPE_INT64                      = 9,
+   PNET_DATA_TYPE_FLOAT32                    = 10,
+   PNET_DATA_TYPE_FLOAT64                    = 11,
 } pnet_data_type_values_t;
 
 static const struct
@@ -103,24 +112,23 @@ static const struct
    uint16_t                insize;      // total in byte length (here always 0)
    uint16_t                outsize;     // total out byte length (can be calculated as var_count * (2 ^ (var_bitlen - 1)) / 8
    uint32_t                var_type;    // variable type
-   uint32_t                var_bitlen;  // variable bit length
    uint32_t                var_count;   // variable count
 } cfg_available_submodule_types[] =
 {
-   {APP_API, PNET_MOD_DAP_IDENT, PNET_SUBMOD_DAP_IDENT, PNET_DIR_NO_IO, 0, 0, PNET_DATA_TYPE_NONE, 0, 0},
-   {APP_API, PNET_MOD_DAP_IDENT, PNET_SUBMOD_DAP_INTERFACE_1_IDENT, PNET_DIR_NO_IO, 0, 0, PNET_DATA_TYPE_NONE, 0, 0},
-   {APP_API, PNET_MOD_DAP_IDENT, PNET_SUBMOD_DAP_INTERFACE_1_PORT_0_IDENT, PNET_DIR_NO_IO, 0, 0, PNET_DATA_TYPE_NONE, 0, 0},
-   {APP_API, PNET_MOD_8B01_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 1 / 8 * 8, PNET_DATA_TYPE_BOOL, 1, 8},
-   {APP_API, PNET_MOD_8U08_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 8 / 8 * 8, PNET_DATA_TYPE_UINT, 8, 8},
-   {APP_API, PNET_MOD_8U16_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 16 / 8 * 8, PNET_DATA_TYPE_UINT, 16, 8},
-   {APP_API, PNET_MOD_8U32_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 32 / 8 * 8, PNET_DATA_TYPE_UINT, 32, 8},
-   {APP_API, PNET_MOD_8U64_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 64 / 8 * 8, PNET_DATA_TYPE_UINT, 64, 8},
-   {APP_API, PNET_MOD_8I08_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 8 / 8 * 8, PNET_DATA_TYPE_INT, 8, 8},
-   {APP_API, PNET_MOD_8I16_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 16 / 8 * 8, PNET_DATA_TYPE_INT, 16, 8},
-   {APP_API, PNET_MOD_8I32_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 32 / 8 * 8, PNET_DATA_TYPE_INT, 32, 8},
-   {APP_API, PNET_MOD_8I64_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 64 / 8 * 8, PNET_DATA_TYPE_INT, 64, 8},
-   {APP_API, PNET_MOD_8F32_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 32 / 8 * 8, PNET_DATA_TYPE_FLOAT, 32, 8},
-   {APP_API, PNET_MOD_8F64_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 64 / 8 * 8, PNET_DATA_TYPE_FLOAT, 64, 8},
+   {APP_API, PNET_MOD_DAP_IDENT, PNET_SUBMOD_DAP_IDENT, PNET_DIR_NO_IO, 0, 0, PNET_DATA_TYPE_NONE, 0},
+   {APP_API, PNET_MOD_DAP_IDENT, PNET_SUBMOD_DAP_INTERFACE_1_IDENT, PNET_DIR_NO_IO, 0, 0, PNET_DATA_TYPE_NONE, 0},
+   {APP_API, PNET_MOD_DAP_IDENT, PNET_SUBMOD_DAP_INTERFACE_1_PORT_0_IDENT, PNET_DIR_NO_IO, 0, 0, PNET_DATA_TYPE_NONE, 0},
+   {APP_API, PNET_MOD_8B01_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 1, PNET_DATA_TYPE_BOOL, 8},
+   {APP_API, PNET_MOD_8U08_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 8, PNET_DATA_TYPE_UINT8, 8},
+   {APP_API, PNET_MOD_8U16_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 16, PNET_DATA_TYPE_UINT16, 8},
+   {APP_API, PNET_MOD_8U32_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 32, PNET_DATA_TYPE_UINT32, 8},
+   {APP_API, PNET_MOD_8U64_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 64, PNET_DATA_TYPE_UINT64, 8},
+   {APP_API, PNET_MOD_8I08_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 8, PNET_DATA_TYPE_INT8, 8},
+   {APP_API, PNET_MOD_8I16_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 16, PNET_DATA_TYPE_INT16, 8},
+   {APP_API, PNET_MOD_8I32_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 32, PNET_DATA_TYPE_INT32, 8},
+   {APP_API, PNET_MOD_8I64_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 64, PNET_DATA_TYPE_INT64, 8},
+   {APP_API, PNET_MOD_8F32_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 32, PNET_DATA_TYPE_FLOAT32, 8},
+   {APP_API, PNET_MOD_8F64_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 64, PNET_DATA_TYPE_FLOAT64, 8},
 };
 
 
@@ -326,7 +334,7 @@ static int app_write_ind(
          sequence_number,
          write_length);
    }
-   printf("No parameters defined.");
+   os_log(LOG_LEVEL_WARNING, "No parameters defined.");
    return 0;
 }
 
@@ -352,7 +360,7 @@ static int app_read_ind(
          sequence_number,
          (unsigned)*p_read_length);
    }
-   printf("No parameters defined.");
+   os_log(LOG_LEVEL_WARNING, "No parameters defined.");
    return 0;
 }
 
@@ -399,19 +407,7 @@ static int app_state_ind(
       (void)pnet_input_set_data_and_iops(APP_API, PNET_SLOT_DAP_IDENT, PNET_SUBMOD_DAP_IDENT,                    NULL, 0, PNET_IOXS_GOOD);
       (void)pnet_input_set_data_and_iops(APP_API, PNET_SLOT_DAP_IDENT, PNET_SUBMOD_DAP_INTERFACE_1_IDENT,        NULL, 0, PNET_IOXS_GOOD);
       (void)pnet_input_set_data_and_iops(APP_API, PNET_SLOT_DAP_IDENT, PNET_SUBMOD_DAP_INTERFACE_1_PORT_0_IDENT, NULL, 0, PNET_IOXS_GOOD);
-	  /*
-      (void)pnet_input_set_data_and_iops(APP_API, 1, 1, NULL, 0, PNET_IOXS_GOOD);
-      (void)pnet_input_set_data_and_iops(APP_API, 2, 1, NULL, 0, PNET_IOXS_GOOD);
-      (void)pnet_input_set_data_and_iops(APP_API, 3, 1, NULL, 0, PNET_IOXS_GOOD);
-      (void)pnet_input_set_data_and_iops(APP_API, 4, 1, NULL, 0, PNET_IOXS_GOOD);
-      (void)pnet_output_set_iocs(APP_API, 0, 1, PNET_IOXS_GOOD);
-      (void)pnet_output_set_iocs(APP_API, 0, 0x8000, PNET_IOXS_GOOD);
-      (void)pnet_output_set_iocs(APP_API, 0, 0x8001, PNET_IOXS_GOOD);
-      (void)pnet_output_set_iocs(APP_API, 1, 1, PNET_IOXS_GOOD);
-      (void)pnet_output_set_iocs(APP_API, 2, 1, PNET_IOXS_GOOD);
-      (void)pnet_output_set_iocs(APP_API, 3, 1, PNET_IOXS_GOOD);
-      (void)pnet_output_set_iocs(APP_API, 4, 1, PNET_IOXS_GOOD);
-	  */
+
       for (slot = 0; slot < PNET_MAX_MODULES; slot++)
       {
          if (custom_modules[slot] > 0)
@@ -423,7 +419,6 @@ static int app_state_ind(
             (void)pnet_output_set_iocs(APP_API, slot, PNET_SUBMOD_CUSTOM_IDENT, PNET_IOXS_GOOD);
          }
       }
-
       (void)pnet_set_provider_state(true);
    }
    else if (state == PNET_EVENT_DATA)
@@ -561,20 +556,18 @@ static int app_exp_submodule_ind(
          printf("\n");
       }
 
-      if (verbosity > 0)
-      {
-         printf("  Plug submodule.     API: %u Slot: 0x%x Module ID: 0x%-4x Subslot: 0x%x Submodule ID: 0x%x Index in supported submodules: %u Dir: %u In: %u Out: %u bytes\n",
-            api,
-            slot,
-            (unsigned)module_ident,
-            subslot,
-            (unsigned)submodule_ident,
-            ix,
-            cfg_available_submodule_types[ix].data_dir,
-            cfg_available_submodule_types[ix].insize,
-            cfg_available_submodule_types[ix].outsize
-            );
-      }
+      printf("  Plug submodule.     API: %u Slot: 0x%x Module ID: 0x%-4x Subslot: 0x%x Submodule ID: 0x%x Index in supported submodules: %u Dir: %u In: %u Out: %u bytes\n",
+         api,
+         slot,
+         (unsigned)module_ident,
+         subslot,
+         (unsigned)submodule_ident,
+         ix,
+         cfg_available_submodule_types[ix].data_dir,
+         cfg_available_submodule_types[ix].insize,
+         cfg_available_submodule_types[ix].outsize
+         );
+
       ret = pnet_plug_submodule(api, slot, subslot, module_ident, submodule_ident,
          cfg_available_submodule_types[ix].data_dir,
          cfg_available_submodule_types[ix].insize,
@@ -820,17 +813,18 @@ void influx_submit()
    influx_buffer_pos = 0;
 }
 
-void influx_enqueue(char* measurement, char* value, int64_t timestamp)
+void influx_enqueue(char* var_type, uint8_t slot, uint16_t var_index, char* value, uint8_t value_len, int64_t timestamp)
 {
    influx_point_pos = 0;
-   memcpy(&influx_point[influx_point_pos], measurement, strlen(measurement));
-   influx_point_pos += strlen(measurement);
+   influx_point_pos += sprintf(&influx_point[influx_point_pos], "%s_%hhu_%hu", var_type, slot, var_index);
+
+   // influx_point_pos += sprintf(&influx_point[influx_point_pos], ",Data\ Type=");
    // ToDo: add tags as ",<tag_key>=<tag_value>"
+
    memcpy(&influx_point[influx_point_pos], " value=", 7);
    influx_point_pos += 7;
-   memcpy(&influx_point[influx_point_pos], value, strlen(value));
-   influx_point_pos += strlen(value);
-   // ToDo: add more fields as ",<field_key>=<field_value>"
+   memcpy(&influx_point[influx_point_pos], value, value_len);
+   influx_point_pos += value_len;
    influx_point[influx_point_pos++] = ' ';
    char ts[30];
    sprintf(ts, "%lld", timestamp);
@@ -849,45 +843,26 @@ void influx_enqueue(char* measurement, char* value, int64_t timestamp)
    }
 }
 
-void influx_enqueue_bool(char* measurement, bool value, int64_t timestamp)
-{
-   influx_enqueue(measurement, value ? "true" : "false", timestamp);
-}
-
-void influx_enqueue_uint(char* measurement, uint64_t value, int64_t timestamp)
-{
-   char val[20];
-   sprintf(val, "%d", value);
-   influx_enqueue(measurement, val, timestamp);
-}
-
-void influx_enqueue_int(char* measurement, int64_t value, int64_t timestamp)
-{
-   char val[20];
-   sprintf(val, "%d", value);
-   influx_enqueue(measurement, val, timestamp);
-}
-
-void influx_enqueue_float(char* measurement, double value, int64_t timestamp)
-{
-   char val[50];
-   sprintf(val, "%lf", value);
-   influx_enqueue(measurement, val, timestamp);
-}
-
 void pn_main(void * arg)
 {
    int            ret = -1;
    uint32_t       mask = EVENT_READY_FOR_DATA | EVENT_TIMER | EVENT_ALARM | EVENT_ABORT;
    uint32_t       flags = 0;
    uint16_t       slot = 0;
-   uint8_t        ix;
+   uint8_t        slot_type_index;
    uint8_t        var_bytelen;
-   char           measurement[20];
+   uint16_t       var_bytepos;
+   uint8_t        var_bitmask;
+   uint16_t       var_index;
+   char           value_str[100];
+   uint8_t        value_str_len;
    uint8_t        outputdata[PNET_MAX_OUTPUT_LEN];
    uint8_t        outputdata_iops;
    uint16_t       outputdata_length;
    bool           outputdata_is_updated = false;
+   struct timeval tv;
+   int64_t        timestamp;
+   int64_t        timestamp_last;
 
    if (verbosity > 0)
    {
@@ -944,6 +919,12 @@ void pn_main(void * arg)
 
          if (main_arep != UINT32_MAX)
          {
+
+            timestamp_last = timestamp;
+            // ToDo : fetch timestamp from msg
+            gettimeofday(&tv, NULL);
+            timestamp = tv.tv_sec * 1000000LL + tv.tv_usec;
+
             for (slot = 0; slot < PNET_MAX_MODULES; slot++)
             {
                if (custom_modules[slot] > 0)
@@ -956,103 +937,167 @@ void pn_main(void * arg)
                   if (memcmp(state[slot], &outputdata, outputdata_length) != 0)
                   {
                      /* Find it in the list of supported submodules */
-                     ix = 0;
-                     while ((ix < NELEMENTS(cfg_available_submodule_types)) &&
-                           ((cfg_available_submodule_types[ix].module_ident_nbr != custom_modules[slot]) ||
-                           (cfg_available_submodule_types[ix].submodule_ident_nbr != PNET_SUBMOD_CUSTOM_IDENT)))
+                     slot_type_index = 0;
+                     while ((slot_type_index < NELEMENTS(cfg_available_submodule_types)) &&
+                           ((cfg_available_submodule_types[slot_type_index].module_ident_nbr != custom_modules[slot]) ||
+                           (cfg_available_submodule_types[slot_type_index].submodule_ident_nbr != PNET_SUBMOD_CUSTOM_IDENT)))
 				         {
-				            ix++;
+				            slot_type_index++;
 				         }
 
-                     // ToDo : fetch timestamp from msg
-                     struct timeval tv;
-                     gettimeofday(&tv, NULL);
-                     int64_t timestamp = tv.tv_sec * 1000000LL + tv.tv_usec;
-
-                     if (cfg_available_submodule_types[ix].var_bitlen == 1) {
-                        for (int vi = 0; vi < cfg_available_submodule_types[ix].var_count; vi++)
+                     var_bytepos = 0;
+                     var_bitmask = 0b00000001;
+                     var_index = 0;
+                     while (var_bytepos < cfg_available_submodule_types[slot_type_index].outsize)
+                     {
+                        switch (cfg_available_submodule_types[slot_type_index].var_type)
                         {
-                           uint8_t vby = vi >> 3;                    // ToDo: check byte order
-                           uint8_t vbm = 1 << (vi - (vby * 8));      // ToDo: check bit order
-                           if (state[slot][vby] & vbm != outputdata[vby] & vbm)
-                           {
-                              bool value = state[slot][vby] & vbm > 0;
-                              if (verbosity > 0)
-                                 printf("Changing [%d:%d] to %s\n", slot, vi, value ? "true" : "false");
-                              // ToDo: define measurement...
-                              sprintf(measurement, "b_%d_%d", slot, vi);
-                              influx_enqueue_bool(measurement, value, timestamp);
-                           }
-                        }
-                     } else {
-                        uint32_t var_bytelen = cfg_available_submodule_types[ix].var_bitlen >> 3;
-                        for (int vi = 0; vi < cfg_available_submodule_types[ix].var_count; vi++)
-                        {
-                           if (memcmp(&state[slot][vi * var_bytelen], &outputdata[vi * var_bytelen], var_bytelen) != 0)
-                           {
-                              if (cfg_available_submodule_types[ix].var_type == PNET_DATA_TYPE_UINT) {
-                                 int64_t value = 0;
-                                 if (var_bytelen == 1) {
-                                    value = ((uint8_t *)&outputdata[vi * var_bytelen])[0];
-                                    sprintf(measurement, "u8_%d_%d", slot, vi);
-                                 } else if (var_bytelen == 2) {
-                                    value = ((uint16_t *)&outputdata[vi * var_bytelen])[0];
-                                    sprintf(measurement, "u16_%d_%d", slot, vi);
-                                 } else if (var_bytelen == 4) {
-                                    value = ((uint32_t *)&outputdata[vi * var_bytelen])[0];
-                                    sprintf(measurement, "u32_%d_%d", slot, vi);
-                                 } else if (var_bytelen == 8) {
-                                    value = ((uint64_t *)&outputdata[vi * var_bytelen])[0];
-                                    sprintf(measurement, "u64_%d_%d", slot, vi);
-                                 }
-                                 if (verbosity > 0)
-                                    printf("Changing [%d:%d] to %lld\n", slot, vi, value);
-                                 // ToDo: define measurement...
-                                 influx_enqueue_uint(measurement, value, timestamp);
-                              } else if (cfg_available_submodule_types[ix].var_type == PNET_DATA_TYPE_INT) {
-                                 int64_t value = 0;
-                                 if (var_bytelen == 1) {
-                                    value = ((int8_t *)&outputdata[vi * var_bytelen])[0];
-                                    sprintf(measurement, "i8_%d_%d", slot, vi);
-                                 } else if (var_bytelen == 2) {
-                                    value = ((int16_t *)&outputdata[vi * var_bytelen])[0];
-                                    sprintf(measurement, "i16_%d_%d", slot, vi);
-                                 } else if (var_bytelen == 4) {
-                                    value = ((int32_t *)&outputdata[vi * var_bytelen])[0];
-                                    sprintf(measurement, "i32_%d_%d", slot, vi);
-                                 } else if (var_bytelen == 8) {
-                                    value = ((int64_t *)&outputdata[vi * var_bytelen])[0];
-                                    sprintf(measurement, "i64_%d_%d", slot, vi);
-                                 }
-                                 if (verbosity > 0)
-                                    printf("Changing [%d:%d] to %lld\n", slot, vi, value);
-                                 // ToDo: define measurement...
-                                 influx_enqueue_int(measurement, value, timestamp);
-                              } else if (cfg_available_submodule_types[ix].var_type == PNET_DATA_TYPE_FLOAT) {
-                                 double value = 0;
-                                 if (var_bytelen == 4) {
-                                    uint32_t temp = htonl(((uint32_t *)&outputdata[vi * var_bytelen])[0]);
-                                    value = *(float*)&temp;
-                                    sprintf(measurement, "f32_%d_%d", slot, vi);
-                                    // value = ((float *)&outputdata[vi * var_bytelen])[0];
-                                 } else if (var_bytelen == 8) {
-                                    uint32_t temp = htonl(((uint32_t *)&outputdata[vi * var_bytelen])[0]);
-                                    value = *(double*)&temp;
-                                    sprintf(measurement, "f64_%d_%d", slot, vi);
-                                    // value = ((double *)&outputdata[vi * var_bytelen])[0];
-                                 }
-                                 if (verbosity > 0)
-                                    printf("Changing [%d:%d] to %lf\n", slot, vi, value);
-                                 // ToDo: define measurement...
-                                 influx_enqueue_float(measurement, value, timestamp);
+                           case PNET_DATA_TYPE_BOOL:
+                              if ((state[slot][var_bytepos] & var_bitmask) != (outputdata[var_bytepos] & var_bitmask))
+                              {
+                                 value_str_len = sprintf(value_str, "%hhu", outputdata[var_bytepos] & var_bitmask > 0 ? 1 : 0);
+                                 influx_enqueue("b", slot, var_index, value_str, value_str_len, timestamp);
+                                 if (verbosity > 0) {
+                                    // value_str[1] = '\0';
+                                    printf("Changing b_%d_%d to %s\n", slot, var_index, value_str);
+                                 } 
                               }
-                           }
+                              if (var_bitmask == 0b10000000) {
+                                 var_bytepos++;
+                                 var_bitmask = 0b00000001;
+                              } else {
+                                 var_bitmask <<= 1;
+                              }
+                              break;
+                           case PNET_DATA_TYPE_UINT8:
+                              var_bytelen = 1;
+                              if (memcmp(&state[slot][var_bytepos], &outputdata[var_bytepos], var_bytelen) != 0) {
+                                 // ToDo: complain if session endianness is not little endian
+                                 value_str_len = sprintf(value_str, "%hhu", ((uint8_t *)&outputdata[var_bytepos])[0]);
+                                 influx_enqueue("u8", slot, var_index, value_str, value_str_len, timestamp);
+                                 if (verbosity > 0)
+                                    printf("Changing u8_%d_%d to %s\n", slot, var_index, value_str);
+                              }
+                              var_bytepos += var_bytelen;
+                              break;
+                           case PNET_DATA_TYPE_UINT16:
+                              var_bytelen = 2;
+                              if (memcmp(&state[slot][var_bytepos], &outputdata[var_bytepos], var_bytelen) != 0) {
+                                 // ToDo: complain if session endianness is not little endian
+                                 value_str_len = sprintf(value_str, "%hu", ((uint16_t *)&outputdata[var_bytepos])[0]);
+                                 influx_enqueue("u16", slot, var_index, value_str, value_str_len, timestamp);
+                                 if (verbosity > 0)
+                                    printf("Changing u16_%d_%d to %s\n", slot, var_index, value_str);
+                              }
+                              var_bytepos += var_bytelen;
+                              break;
+                           case PNET_DATA_TYPE_UINT32:
+                              var_bytelen = 4;
+                              if (memcmp(&state[slot][var_bytepos], &outputdata[var_bytepos], var_bytelen) != 0) {
+                                 // ToDo: complain if session endianness is not little endian
+                                 value_str_len = sprintf(value_str, "%lu", ((uint32_t *)&outputdata[var_bytepos])[0]);
+                                 influx_enqueue("u32", slot, var_index, value_str, value_str_len, timestamp);
+                                 if (verbosity > 0)
+                                    printf("Changing u32_%d_%d to %s\n", slot, var_index, value_str);
+                              }
+                              var_bytepos += var_bytelen;
+                              break;
+                           case PNET_DATA_TYPE_UINT64:
+                              var_bytelen = 8;
+                              if (memcmp(&state[slot][var_bytepos], &outputdata[var_bytepos], var_bytelen) != 0) {
+                                 // ToDo: complain if session endianness is not little endian
+                                 value_str_len = sprintf(value_str, "%llu", ((uint64_t *)&outputdata[var_bytepos])[0]);
+                                 influx_enqueue("u64", slot, var_index, value_str, value_str_len, timestamp);
+                                 if (verbosity > 0)
+                                    printf("Changing u64_%d_%d to %s\n", slot, var_index, value_str);
+                              }
+                              var_bytepos += var_bytelen;
+                              break;
+                           case PNET_DATA_TYPE_INT8:
+                              var_bytelen = 1;
+                              if (memcmp(&state[slot][var_bytepos], &outputdata[var_bytepos], var_bytelen) != 0) {
+                                 // ToDo: complain if session endianness is not little endian
+                                 value_str_len = sprintf(value_str, "%hhi", ((int8_t *)&outputdata[var_bytepos])[0]);
+                                 influx_enqueue("i8", slot, var_index, value_str, value_str_len, timestamp);
+                                 if (verbosity > 0)
+                                    printf("Changing i8_%d_%d to %s\n", slot, var_index, value_str);
+                              }
+                              var_bytepos += var_bytelen;
+                              break;
+                           case PNET_DATA_TYPE_INT16:
+                              var_bytelen = 2;
+                              if (memcmp(&state[slot][var_bytepos], &outputdata[var_bytepos], var_bytelen) != 0) {
+                                 // ToDo: complain if session endianness is not little endian
+                                 value_str_len = sprintf(value_str, "%hi", ((int16_t *)&outputdata[var_bytepos])[0]);
+                                 influx_enqueue("i16", slot, var_index, value_str, value_str_len, timestamp);
+                                 if (verbosity > 0)
+                                    printf("Changing i16_%d_%d to %s\n", slot, var_index, value_str);
+                              }
+                              var_bytepos += var_bytelen;
+                              break;
+                           case PNET_DATA_TYPE_INT32:
+                              var_bytelen = 4;
+                              if (memcmp(&state[slot][var_bytepos], &outputdata[var_bytepos], var_bytelen) != 0) {
+                                 // ToDo: complain if session endianness is not little endian
+                                 value_str_len = sprintf(value_str, "%li", ((int32_t *)&outputdata[var_bytepos])[0]);
+                                 influx_enqueue("i32", slot, var_index, value_str, value_str_len, timestamp);
+                                 if (verbosity > 0)
+                                    printf("Changing i32_%d_%d to %s\n", slot, var_index, value_str);
+                              }
+                              var_bytepos += var_bytelen;
+                              break;
+                           case PNET_DATA_TYPE_INT64:
+                              var_bytelen = 8;
+                              if (memcmp(&state[slot][var_bytepos], &outputdata[var_bytepos], var_bytelen) != 0) {
+                                 // ToDo: complain if session endianness is not little endian
+                                 value_str_len = sprintf(value_str, "%lli", ((int64_t *)&outputdata[var_bytepos])[0]);
+                                 influx_enqueue("i64", slot, var_index, value_str, value_str_len, timestamp);
+                                 if (verbosity > 0)
+                                    printf("Changing i64_%d_%d to %s\n", slot, var_index, value_str);
+                              }
+                              var_bytepos += var_bytelen;
+                              break;
+                           case PNET_DATA_TYPE_FLOAT32:
+                              var_bytelen = 4;
+                              if (memcmp(&state[slot][var_bytepos], &outputdata[var_bytepos], var_bytelen) != 0) {
+                                 // ToDo: complain if session floating point representation is not IEEE
+                                 uint32_t temp = htonl(((uint32_t *)&outputdata[var_bytepos])[0]);
+                                 value_str_len = sprintf(value_str, "%f", *(float*)&temp);
+                                 influx_enqueue("f32", slot, var_index, value_str, value_str_len, timestamp);
+                                 if (verbosity > 0)
+                                    printf("Changing f32_%d_%d to %s\n", slot, var_index, value_str);
+                              }
+                              var_bytepos += var_bytelen;
+                              break;
+                           case PNET_DATA_TYPE_FLOAT64:
+                              var_bytelen = 8;
+                              if (memcmp(&state[slot][var_bytepos], &outputdata[var_bytepos], var_bytelen) != 0) {
+                                 // ToDo: complain if session floating point representation is not IEEE
+                                 uint64_t temp = htonl(((uint64_t *)&outputdata[var_bytepos])[0]);
+                                 value_str_len = sprintf(value_str, "%lf", *(double*)&temp);
+                                 influx_enqueue("f64", slot, var_index, value_str, value_str_len, timestamp);
+                                 if (verbosity > 0)
+                                    printf("Changing f64_%d_%d to %s\n", slot, var_index, value_str);
+                              }
+                              var_bytepos += var_bytelen;
+                              break;
+                           default:
+                              os_log(LOG_LEVEL_WARNING, "Unknown variable type: %d", cfg_available_submodule_types[slot_type_index].var_type);
+                              break;
                         }
+                        var_index++;
                      }
-                     memcpy(state[slot], &outputdata, outputdata_length);
+                     memcpy(state[slot], &outputdata, cfg_available_submodule_types[slot_type_index].outsize);
                   }
                }
             }
+
+            if (verbosity > 0) {
+               gettimeofday(&tv, NULL);
+               printf("rt: % 10d / % 10d\n", timestamp - timestamp_last, tv.tv_sec * 1000000LL + tv.tv_usec - timestamp);
+            }
+            // ProfilerStop();
+
          }
 
          pnet_handle_periodic();
