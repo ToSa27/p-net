@@ -13,8 +13,6 @@
 #include "osal.h"
 #include "log.h"
 
-// #include <gperftools/profiler.h>
-
 /********************* Call-back function declarations ************************/
 
 static int app_exp_module_ind(uint16_t api, uint16_t slot, uint32_t module_ident_number);
@@ -38,16 +36,20 @@ static int app_alarm_ack_cnf(uint32_t arep, int res);
 #define EVENT_TIMER                    BIT(1)
 #define EVENT_ALARM                    BIT(2)
 #define EVENT_ABORT                    BIT(15)
-
 #define EXIT_CODE_ERROR                1
+
 #define TICK_INTERVAL_US               250         /* org 1000 */
-#define APP_DEFAULT_ETHERNET_INTERFACE "eth0"
 #define APP_PRIORITY                   15          /* org 15 */
 #define APP_STACKSIZE                  4096        /* bytes */
 #define APP_MAIN_SLEEPTIME_US          5*1000*1000
 #define PNET_MAX_OUTPUT_LEN            1440        /* org 256 */
 
 #define IP_INVALID                     0
+#define APP_DEFAULT_ETHERNET_INTERFACE "eth0"
+#define APP_DEFAULT_LINE_NAME          "Line1"
+#define APP_DEFAULT_CONTROLLER_NAME    "PLC1"
+#define APP_DEFAULT_PROGRAM_NAME       "Program1"
+#define APP_DEFAULT_PREFIX             ""
 
 
 /**************** From the GSDML file ****************************************/
@@ -71,18 +73,18 @@ static int app_alarm_ack_cnf(uint32_t arep, int res);
  *
  * Assume that all modules only have a single submodule, with same number.
  */
-#define PNET_MOD_8B01_IDENT         0x00000100
-#define PNET_MOD_8U08_IDENT         0x00000200
-#define PNET_MOD_8U16_IDENT         0x00000210
-#define PNET_MOD_8U32_IDENT         0x00000220
-#define PNET_MOD_8U64_IDENT         0x00000230
-#define PNET_MOD_8I08_IDENT         0x00000300
-#define PNET_MOD_8I16_IDENT         0x00000310
-#define PNET_MOD_8I32_IDENT         0x00000320
-#define PNET_MOD_8I64_IDENT         0x00000330
-#define PNET_MOD_8F32_IDENT         0x00000420
-#define PNET_MOD_8F64_IDENT         0x00000430
-#define PNET_SUBMOD_CUSTOM_IDENT    0x00000001
+#define PNET_MOD_B01_IDENT         0x00000100
+#define PNET_MOD_U08_IDENT         0x00000200
+#define PNET_MOD_U16_IDENT         0x00000210
+#define PNET_MOD_U32_IDENT         0x00000220
+#define PNET_MOD_U64_IDENT         0x00000230
+#define PNET_MOD_I08_IDENT         0x00000300
+#define PNET_MOD_I16_IDENT         0x00000310
+#define PNET_MOD_I32_IDENT         0x00000320
+#define PNET_MOD_I64_IDENT         0x00000330
+#define PNET_MOD_F32_IDENT         0x00000420
+#define PNET_MOD_F64_IDENT         0x00000430
+#define PNET_SUBMOD_CUSTOM_IDENT   0x00000001
 
 
 /*** Lists of supported modules and submodules ********/
@@ -118,17 +120,17 @@ static const struct
    {APP_API, PNET_MOD_DAP_IDENT, PNET_SUBMOD_DAP_IDENT, PNET_DIR_NO_IO, 0, 0, PNET_DATA_TYPE_NONE, 0},
    {APP_API, PNET_MOD_DAP_IDENT, PNET_SUBMOD_DAP_INTERFACE_1_IDENT, PNET_DIR_NO_IO, 0, 0, PNET_DATA_TYPE_NONE, 0},
    {APP_API, PNET_MOD_DAP_IDENT, PNET_SUBMOD_DAP_INTERFACE_1_PORT_0_IDENT, PNET_DIR_NO_IO, 0, 0, PNET_DATA_TYPE_NONE, 0},
-   {APP_API, PNET_MOD_8B01_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 1, PNET_DATA_TYPE_BOOL, 8},
-   {APP_API, PNET_MOD_8U08_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 8, PNET_DATA_TYPE_UINT8, 8},
-   {APP_API, PNET_MOD_8U16_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 16, PNET_DATA_TYPE_UINT16, 8},
-   {APP_API, PNET_MOD_8U32_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 32, PNET_DATA_TYPE_UINT32, 8},
-   {APP_API, PNET_MOD_8U64_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 64, PNET_DATA_TYPE_UINT64, 8},
-   {APP_API, PNET_MOD_8I08_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 8, PNET_DATA_TYPE_INT8, 8},
-   {APP_API, PNET_MOD_8I16_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 16, PNET_DATA_TYPE_INT16, 8},
-   {APP_API, PNET_MOD_8I32_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 32, PNET_DATA_TYPE_INT32, 8},
-   {APP_API, PNET_MOD_8I64_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 64, PNET_DATA_TYPE_INT64, 8},
-   {APP_API, PNET_MOD_8F32_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 32, PNET_DATA_TYPE_FLOAT32, 8},
-   {APP_API, PNET_MOD_8F64_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 64, PNET_DATA_TYPE_FLOAT64, 8},
+   {APP_API, PNET_MOD_B01_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 1, PNET_DATA_TYPE_BOOL, 2048},
+   {APP_API, PNET_MOD_U08_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 8, PNET_DATA_TYPE_UINT8, 256},
+   {APP_API, PNET_MOD_U16_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 16, PNET_DATA_TYPE_UINT16, 128},
+   {APP_API, PNET_MOD_U32_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 32, PNET_DATA_TYPE_UINT32, 64},
+   {APP_API, PNET_MOD_U64_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 64, PNET_DATA_TYPE_UINT64, 32},
+   {APP_API, PNET_MOD_I08_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 8, PNET_DATA_TYPE_INT8, 256},
+   {APP_API, PNET_MOD_I16_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 16, PNET_DATA_TYPE_INT16, 128},
+   {APP_API, PNET_MOD_I32_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 32, PNET_DATA_TYPE_INT32, 64},
+   {APP_API, PNET_MOD_I64_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 64, PNET_DATA_TYPE_INT64, 32},
+   {APP_API, PNET_MOD_F32_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 32, PNET_DATA_TYPE_FLOAT32, 64},
+   {APP_API, PNET_MOD_F64_IDENT, PNET_SUBMOD_CUSTOM_IDENT, PNET_DIR_OUTPUT, 0, 64, PNET_DATA_TYPE_FLOAT64, 32},
 };
 
 
@@ -680,16 +682,24 @@ void show_usage()
    printf("Wait for connection from IO-controller.\n");
    printf("\n");
    printf("Optional arguments:\n");
-   printf("   --help       Show this help text and exit\n");
-   printf("   -h           Show this help text and exit\n");
-   printf("   -v           Incresase verbosity\n");
-   printf("   -i INTERF    Set Ethernet interface name. Defaults to %s\n", APP_DEFAULT_ETHERNET_INTERFACE);
-   printf("   -s NAME      Set station name. Defaults to %s\n", APP_DEFAULT_STATION_NAME);
+   printf("   --help         Show this help text and exit\n");
+   printf("   -h             Show this help text and exit\n");
+   printf("   -v             Incresase verbosity\n");
+   printf("   -i INTERF      Set Ethernet interface name. Defaults to %s\n", APP_DEFAULT_ETHERNET_INTERFACE);
+   printf("   -s NAME        Set station name. Defaults to %s\n", APP_DEFAULT_STATION_NAME);
+   printf("   -l NAME        Set line name. Default is %s\n", APP_DEFAULT_LINE_NAME);
+   printf("   -c NAME        Set controller name. Default is %s\n", APP_DEFAULT_CONTROLLER_NAME);
+   printf("   -p NAME        Set program name. Default is %s\n", APP_DEFAULT_PROGRAM_NAME);
+   printf("   -x PREFIX      Set prefix for measurement names written to Influx. Default is %s\n", APP_DEFAULT_PREFIX);
 }
 
 struct cmd_args {
-   char station_name[64];
    char eth_interface[64];
+   char station_name[64];
+   char line_name[32];
+   char controller_name[32];
+   char program_name[64];
+   char prefix[16];
    int  verbosity;
 };
 
@@ -714,12 +724,16 @@ struct cmd_args parse_commandline_arguments(int argc, char *argv[])
 
    // Default values
    struct cmd_args output_arguments;
-   strcpy(output_arguments.station_name, APP_DEFAULT_STATION_NAME);
    strcpy(output_arguments.eth_interface, APP_DEFAULT_ETHERNET_INTERFACE);
+   strcpy(output_arguments.station_name, APP_DEFAULT_STATION_NAME);
+   strcpy(output_arguments.line_name, APP_DEFAULT_LINE_NAME);
+   strcpy(output_arguments.controller_name, APP_DEFAULT_CONTROLLER_NAME);
+   strcpy(output_arguments.program_name, APP_DEFAULT_PROGRAM_NAME);
+   strcpy(output_arguments.prefix, APP_DEFAULT_PREFIX);
    output_arguments.verbosity = 0;
 
    int option;
-   while ((option = getopt(argc, argv, "hvi:s:")) != -1) {
+   while ((option = getopt(argc, argv, "hvi:s:l:c:p:x:")) != -1) {
       switch (option) {
       case 'v':
          output_arguments.verbosity++;
@@ -729,6 +743,18 @@ struct cmd_args parse_commandline_arguments(int argc, char *argv[])
          break;
       case 's':
          strcpy(output_arguments.station_name, optarg);
+         break;
+      case 'l':
+         strcpy(output_arguments.line_name, optarg);
+         break;
+      case 'c':
+         strcpy(output_arguments.controller_name, optarg);
+         break;
+      case 'p':
+         strcpy(output_arguments.program_name, optarg);
+         break;
+      case 'x':
+         strcpy(output_arguments.prefix, optarg);
          break;
       case 'h':
       case '?':
@@ -816,11 +842,21 @@ void influx_submit()
 void influx_enqueue(char* var_type, uint8_t slot, uint16_t var_index, char* value, uint8_t value_len, int64_t timestamp)
 {
    influx_point_pos = 0;
-   influx_point_pos += sprintf(&influx_point[influx_point_pos], "%s_%hhu_%hu", var_type, slot, var_index);
-
-   // influx_point_pos += sprintf(&influx_point[influx_point_pos], ",Data\ Type=");
-   // ToDo: add tags as ",<tag_key>=<tag_value>"
-
+   influx_point_pos += sprintf(&influx_point[influx_point_pos], "%s%s_%hhu_%hu", arguments.prefix, var_type, slot, var_index);
+   influx_point_pos += sprintf(&influx_point[influx_point_pos], ",ControllerName=%s", arguments.controller_name);
+   influx_point_pos += sprintf(&influx_point[influx_point_pos], ",DataType=%s", var_type);
+   influx_point_pos += sprintf(&influx_point[influx_point_pos], ",Global1=%s", "0");
+   influx_point_pos += sprintf(&influx_point[influx_point_pos], ",Global2=%s", "0");
+   influx_point_pos += sprintf(&influx_point[influx_point_pos], ",LineMode=%s", "0");
+   influx_point_pos += sprintf(&influx_point[influx_point_pos], ",LineName=%s", arguments.line_name);
+   influx_point_pos += sprintf(&influx_point[influx_point_pos], ",LineState=%s", "0");
+   influx_point_pos += sprintf(&influx_point[influx_point_pos], ",ProgramName=%s", arguments.program_name);
+   influx_point_pos += sprintf(&influx_point[influx_point_pos], ",ReferenceName=%s%s_%hhu_%hu", arguments.prefix, var_type, slot, var_index);
+   influx_point_pos += sprintf(&influx_point[influx_point_pos], ",TagDescription=%s%s_%hhu_%hu", arguments.prefix, var_type, slot, var_index);
+   influx_point_pos += sprintf(&influx_point[influx_point_pos], ",TimeShift1=%s", "0");
+   influx_point_pos += sprintf(&influx_point[influx_point_pos], ",TimeShift2=%s", "0");
+   influx_point_pos += sprintf(&influx_point[influx_point_pos], ",UserFilter1=%s", "Reserved1");
+   influx_point_pos += sprintf(&influx_point[influx_point_pos], ",UserFilter2=%s", "Reserved2");
    memcpy(&influx_point[influx_point_pos], " value=", 7);
    influx_point_pos += 7;
    memcpy(&influx_point[influx_point_pos], value, value_len);
@@ -1092,7 +1128,7 @@ void pn_main(void * arg)
                }
             }
 
-            if (verbosity > 0) {
+            if (verbosity > 1) {
                gettimeofday(&tv, NULL);
                printf("rt: % 10d / % 10d\n", timestamp - timestamp_last, tv.tv_sec * 1000000LL + tv.tv_usec - timestamp);
             }
@@ -1132,6 +1168,10 @@ int main(int argc, char *argv[])
       printf("Verbosity level:    %u\n", verbosity);
       printf("Ethernet interface: %s\n", arguments.eth_interface);
       printf("Station name:       %s\n", arguments.station_name);
+      printf("Line name:          %s\n", arguments.line_name);
+      printf("Controller name:    %s\n", arguments.controller_name);
+      printf("Program name:       %s\n", arguments.program_name);
+      printf("Prefix:             %s\n", arguments.prefix);
    }
 
    /* Read IP, netmask and gateway */
