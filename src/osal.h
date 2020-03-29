@@ -117,24 +117,6 @@ enum os_eth_type {
 typedef uint32_t os_ipaddr_t;
 typedef uint16_t os_ipport_t;
 
-CC_PACKED_BEGIN
-typedef struct CC_PACKED os_ethaddr
-{
-  uint8_t addr[6];
-} os_ethaddr_t;
-CC_PACKED_END
-
-CC_PACKED_BEGIN
-typedef struct CC_PACKED os_ethhdr
-{
-  os_ethaddr_t dest;
-  os_ethaddr_t src;
-  uint16_t  type;
-} os_ethhdr_t;
-CC_PACKED_END
-
-#define OS_ETH_HLEN 14
-
 int os_snprintf (char * str, size_t size, const char * fmt, ...) CC_FORMAT (3,4);
 void os_log (int type, const char * fmt, ...) CC_FORMAT (2,3);
 void * os_malloc (size_t size);
