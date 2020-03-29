@@ -577,27 +577,6 @@ int os_set_ip_suite(
    return 0;
 }
 
-// ToSa27 - this is a work-around
-//   needs some broader rework for a real fix
-//   as the interface name is needed to fetch
-//   the MAC address properly
-
-uint8_t _mac_addr[6];
-bool _mac_addr_defined = false;
-
-void os_def_mac_addr(uint8_t * mac_addr)
-{
-   memcpy(_mac_addr, mac_addr, 6);
-   _mac_addr_defined = true;
-}
-
-void os_cpy_mac_addr(uint8_t * mac_addr)
-{
-   if (!_mac_addr_defined)
-      os_log(LOG_LEVEL_ERROR, "MAC not defined!");
-   memcpy(mac_addr, _mac_addr, 6);
-}
-
 void os_get_button(uint16_t id, bool *p_pressed)
 {
 

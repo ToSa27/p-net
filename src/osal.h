@@ -176,12 +176,6 @@ void os_timer_destroy (os_timer_t * timer);
 os_buf_t * os_buf_alloc(uint16_t length);
 void os_buf_free(os_buf_t *p);
 uint8_t os_buf_header(os_buf_t *p, int16_t header_size_increment);
-// ToSa27 - this is a work-around
-//   needs some broader rework for a real fix
-//   as the interface name is needed to fetch
-//   the MAC address properly
-void os_def_mac_addr(uint8_t * mac_addr);
-void os_cpy_mac_addr(uint8_t * mac_addr);
 
 int os_eth_send(uint32_t id, os_buf_t * buf);
 int os_eth_init(const char * if_name);
