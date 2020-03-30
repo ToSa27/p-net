@@ -220,9 +220,10 @@ static pnet_cfg_t                pnet_default_cfg =
       /* Network configuration */
       .send_hello = 1,                    /* Send HELLO */
       .dhcp_enable = 0,
-      .ip_addr = { 0, 0, 0, 0 },          /* Read from Linux kernel */
-      .ip_mask = { 255, 255, 255, 0 },    /* Read from Linux kernel */
-      .ip_gateway = { 0, 0, 0, 0 },       /* Read from Linux kernel */
+      .ip_addr = { 0 },                   /* Read from Linux kernel */
+      .ip_mask = { 0 },                   /* Read from Linux kernel */
+      .ip_gateway = { 0 },                /* Read from Linux kernel */
+      .eth_addr = { 0 },                  /* Read from Linux kernel */
 };
 
 /********************************** Globals ***********************************/
@@ -1194,7 +1195,6 @@ int main(int argc, char *argv[])
 	ioctl(fd, SIOCGIFHWADDR, &ifr);
    uint8_t macbuffer[6];
    memcpy(macbuffer, (uint8_t *)ifr.ifr_hwaddr.sa_data, 6);
-	os_def_mac_addr(macbuffer);
    close (fd);
 
    if (ip_int == IP_INVALID)
@@ -1233,6 +1233,7 @@ int main(int argc, char *argv[])
    copy_ip_to_struct(&pnet_default_cfg.ip_addr, ip_int);
    copy_ip_to_struct(&pnet_default_cfg.ip_gateway, gateway_ip_int);
    copy_ip_to_struct(&pnet_default_cfg.ip_mask, netmask_int);
+   memcpy(pnet_default_cfg.eth_addr.addr, macbuffer, 6);
    strcpy(pnet_default_cfg.station_name, arguments.station_name);
 
    if (pnet_init(arguments.eth_interface, TICK_INTERVAL_US, &pnet_default_cfg) != 0)
