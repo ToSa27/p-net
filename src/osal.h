@@ -117,6 +117,7 @@ enum os_eth_type {
 typedef uint32_t os_ipaddr_t;
 typedef uint16_t os_ipport_t;
 
+
 int os_snprintf (char * str, size_t size, const char * fmt, ...) CC_FORMAT (3,4);
 void os_log (int type, const char * fmt, ...) CC_FORMAT (2,3);
 void * os_malloc (size_t size);
@@ -127,15 +128,23 @@ uint32_t os_get_current_time_us (void);
 os_thread_t * os_thread_create (const char * name, int priority,
         int stacksize, void (*entry) (void * arg), void * arg);
 
+void os_thread_destroy(os_thread_t *thread);
+
+/********************** Mutex ************************************************/
+
 os_mutex_t * os_mutex_create (void);
 void os_mutex_lock (os_mutex_t * mutex);
 void os_mutex_unlock (os_mutex_t * mutex);
 void os_mutex_destroy (os_mutex_t * mutex);
 
+/********************** Semaphore ********************************************/
+
 os_sem_t * os_sem_create (size_t count);
 int os_sem_wait (os_sem_t * sem, uint32_t time);
 void os_sem_signal (os_sem_t * sem);
 void os_sem_destroy (os_sem_t * sem);
+
+/********************** Event ************************************************/
 
 os_event_t * os_event_create (void);
 int os_event_wait (os_event_t * event, uint32_t mask, uint32_t * value, uint32_t time);
@@ -143,10 +152,14 @@ void os_event_set (os_event_t * event, uint32_t value);
 void os_event_clr (os_event_t * event, uint32_t value);
 void os_event_destroy (os_event_t * event);
 
+/********************** Mbox *************************************************/
+
 os_mbox_t * os_mbox_create (size_t size);
 int os_mbox_fetch (os_mbox_t * mbox, void ** msg, uint32_t time);
 int os_mbox_post (os_mbox_t * mbox, void * msg, uint32_t time);
 void os_mbox_destroy (os_mbox_t * mbox);
+
+/********************** Timer ************************************************/
 
 os_timer_t * os_timer_create (uint32_t us, void (*fn) (os_timer_t * timer, void * arg),
                               void * arg, bool oneshot);
@@ -155,12 +168,41 @@ void os_timer_start (os_timer_t * timer);
 void os_timer_stop (os_timer_t * timer);
 void os_timer_destroy (os_timer_t * timer);
 
+/********************** Buffer ***********************************************/
+
 os_buf_t * os_buf_alloc(uint16_t length);
 void os_buf_free(os_buf_t *p);
 uint8_t os_buf_header(os_buf_t *p, int16_t header_size_increment);
 
-int os_eth_send(uint32_t id, os_buf_t * buf);
-int os_eth_init(const char * if_name);
+/*********************** Raw socket ******************************************/
+
+/**
+ * Send raw Ethernet data
+ *
+ * @param handle        In: Ethernet handle
+ * @param buf           In: Buffer with data to be sent
+ * @return  The number of bytes sent, or -1 if an error occurred.
+ */
+int os_eth_send(
+   os_eth_handle_t         *handle,
+   os_buf_t                *buf);
+
+/**
+ * Initialize receiving of raw Ethernet frames (in separate thread)
+ *
+ * @param if_name       In: Ethernet interface name
+ * @param callback      In: Callback for received raw Ethernet frames
+ * @param arg           InOut: User argument passed to the callback
+ *
+ * @return  the Ethernet handle, or NULL if an error occurred.
+ */
+os_eth_handle_t* os_eth_init(
+   const char              *if_name,
+   os_eth_callback_t       *callback,
+   void                    *arg);
+
+
+/***************************** UDP *******************************************/
 
 int os_udp_socket(void);
 int os_udp_open(os_ipaddr_t addr, os_ipport_t port);
@@ -176,6 +218,9 @@ int os_udp_recvfrom(uint32_t id,
       int size);
 void os_udp_close(uint32_t id);
 
+
+/**************************** IP *********************************************/
+
 int os_get_ip_suite(
    os_ipaddr_t             *p_ipaddr,
    os_ipaddr_t             *p_netmask,
@@ -187,6 +232,9 @@ int os_set_ip_suite(
    os_ipaddr_t             *p_netmask,
    os_ipaddr_t             *p_gw,
    const char              *hostname);
+
+
+/********************** Digital input and output *****************************/
 
 void os_set_led(
    uint16_t                id,         /* Starting from 0 */

@@ -100,6 +100,8 @@ os_thread_t * os_thread_create (const char * name, int priority,
    return task_spawn (name, entry, priority, stacksize, arg);
 }
 
+/********************** Mutex ************************************************/
+
 os_mutex_t * os_mutex_create (void)
 {
    return mtx_create();
@@ -120,6 +122,8 @@ void os_mutex_destroy (os_mutex_t * mutex)
    mtx_destroy (mutex);
 }
 
+/********************** Time *************************************************/
+
 void os_usleep (uint32_t us)
 {
    task_delay (tick_from_ms (us / 1000));
@@ -129,6 +133,8 @@ uint32_t os_get_current_time_us (void)
 {
    return 1000 * tick_to_ms (tick_get());
 }
+
+/********************** Semaphore ********************************************/
 
 os_sem_t * os_sem_create (size_t count)
 {
@@ -160,6 +166,8 @@ void os_sem_destroy (os_sem_t * sem)
 {
    sem_destroy (sem);
 }
+
+/********************** Event ************************************************/
 
 os_event_t * os_event_create (void)
 {
@@ -197,6 +205,8 @@ void os_event_destroy (os_event_t * event)
 {
    flags_destroy (event);
 }
+
+/********************** Mbox *************************************************/
 
 os_mbox_t * os_mbox_create (size_t size)
 {
@@ -240,6 +250,8 @@ void os_mbox_destroy (os_mbox_t * mbox)
    mbox_destroy (mbox);
 }
 
+/********************** Timer ************************************************/
+
 os_timer_t * os_timer_create (uint32_t us, void (*fn) (os_timer_t *, void * arg),
                               void * arg, bool oneshot)
 {
@@ -267,6 +279,8 @@ void os_timer_destroy (os_timer_t * timer)
    tmr_destroy (timer);
 }
 
+/********************** Buffer ***********************************************/
+
 os_buf_t * os_buf_alloc(uint16_t length)
 {
    return pbuf_alloc(PBUF_RAW, length, PBUF_POOL);
@@ -283,6 +297,8 @@ uint8_t os_buf_header(os_buf_t *p, int16_t header_size_increment)
 {
    return pbuf_header(p, header_size_increment);
 }
+
+/********************** Digital input and output *****************************/
 
 void os_get_button(uint16_t id, bool *p_pressed)
 {
