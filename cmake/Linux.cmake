@@ -71,6 +71,12 @@ target_sources(hist_io
   historian_io/historian_io.c
   )
 
+target_link_libraries(hist_io
+  PUBLIC
+  pthread
+  zmq
+)
+
 if (BUILD_TESTING)
   set(GOOGLE_TEST_INDIVIDUAL TRUE)
   target_sources(pf_test

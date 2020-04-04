@@ -812,13 +812,17 @@ void print_ip_address(uint32_t ip){
 }
 
 struct sockaddr_in influx_addr;
-int influx_socket;
-char influx_prefix[1000];
-uint32_t influx_prefix_pos;
-char influx_point[1000];
-uint32_t influx_point_pos;
-char influx_buffer[64000];
-uint32_t influx_buffer_pos = 0;
+int                influx_socket;
+char               influx_prefix[1000];
+uint32_t           influx_prefix_pos;
+char               influx_point[1000];
+uint32_t           influx_point_pos;
+char               influx_buffer[64000];
+uint32_t           influx_buffer_pos = 0;
+uint64_t           influx_duration_sum = 0;
+uint32_t           influx_duration_count = 0;
+uint32_t           influx_duration_max = 0;
+uint32_t           influx_duration_alltimemax = 0;
 
 void influx_init()
 {
@@ -835,6 +839,13 @@ void influx_init()
 
 void influx_submit()
 {
+   struct timeval tv;
+   int64_t        timestamp_start;
+   int64_t        timestamp_finish;
+
+   gettimeofday(&tv, NULL);
+   timestamp_start = tv.tv_sec * 1000000LL + tv.tv_usec;
+
    if (verbosity > 1)
    {
       influx_buffer[influx_buffer_pos] = '\0';
@@ -843,6 +854,17 @@ void influx_submit()
 
    sendto(influx_socket, influx_buffer, influx_buffer_pos, 0, (struct sockaddr *)&influx_addr, sizeof(influx_addr));
    influx_buffer_pos = 0;
+
+   gettimeofday(&tv, NULL);
+   timestamp_finish = tv.tv_sec * 1000000LL + tv.tv_usec;
+
+   influx_duration_sum += (timestamp_finish - timestamp_start);
+   influx_duration_count++;
+   if (timestamp_finish - timestamp_start > influx_duration_max) {
+      influx_duration_max = timestamp_finish - timestamp_start;
+      if (timestamp_finish - timestamp_start > influx_duration_alltimemax)
+         influx_duration_alltimemax = timestamp_finish - timestamp_start;
+   }
 }
 
 void influx_enqueue_raw(char* measurement, char* value, uint8_t value_len, int64_t timestamp)
@@ -856,8 +878,6 @@ void influx_enqueue_raw(char* measurement, char* value, uint8_t value_len, int64
    influx_point_pos += sprintf(&influx_point[influx_point_pos], "%s", measurement);
    influx_point_pos += sprintf(&influx_point[influx_point_pos], ",ControllerName=%s", arguments.controller_name);
    influx_point_pos += sprintf(&influx_point[influx_point_pos], ",ProgramName=%s", arguments.program_name);
-   influx_point_pos += sprintf(&influx_point[influx_point_pos], ",ReferenceName=%s", measurement);
-   influx_point_pos += sprintf(&influx_point[influx_point_pos], ",TagDescription=%s", measurement);
    memcpy(&influx_point[influx_point_pos], " value=", 7);
    influx_point_pos += 7;
    memcpy(&influx_point[influx_point_pos], value, value_len);
@@ -925,6 +945,87 @@ void influx_enqueue(char* var_type, uint8_t slot, uint16_t var_index, char* valu
    }
 }
 
+void *             zmq_context;
+void *             zmq_pub;
+char               zmq_topic[100];
+uint32_t           zmq_topic_pos;
+char               zmq_point[1000];
+uint32_t           zmq_point_pos;
+
+void zmqp_init()
+{
+   zmq_context = zmq_ctx_new();
+   zmq_pub = zmq_socket(zmq_context, ZMQ_PUB);
+   zmq_bind(zmq_pub, "tcp:/" "/" "*:5555");  // separate strings only to avoid misinterpretation as comment in some editors
+}
+
+void zmqp_enqueue_raw(char* measurement, char* value, uint8_t value_len, int64_t timestamp)
+{
+   zmq_topic_pos = sprintf(zmq_topic, "%s", measurement);
+   zmq_point_pos = 0;
+   zmq_point[zmq_point_pos++] = '{';
+   zmq_point_pos += sprintf(&zmq_point[zmq_point_pos], "\"Measurement\":\"%s\"", measurement);
+   zmq_point_pos += sprintf(&zmq_point[zmq_point_pos], ",\"Timestamp\"=%lld", timestamp);
+   memcpy(&zmq_point[zmq_point_pos], ",\"value\"=", 9);
+   zmq_point_pos += 9;
+   memcpy(&zmq_point[zmq_point_pos], value, value_len);
+   zmq_point_pos += value_len;
+   zmq_point_pos += sprintf(&zmq_point[zmq_point_pos], ",\"ControllerName\"=\"%s\"", arguments.controller_name);
+   zmq_point_pos += sprintf(&zmq_point[zmq_point_pos], ",\"ProgramName\"=\"%s\"", arguments.program_name);
+   zmq_point[zmq_point_pos++] = '}';
+
+   zmq_send(zmq_pub, zmq_topic, zmq_topic_pos, ZMQ_SNDMORE);
+   zmq_send(zmq_pub, zmq_point, zmq_point_pos, 0);
+}
+
+void zmqp_enqueue(char* var_type, uint8_t slot, uint16_t var_index, char* value, uint8_t value_len, int64_t timestamp)
+{
+   zmq_topic_pos = sprintf(zmq_topic, "%s%s.%hhu.%hu", arguments.prefix, var_type, slot, var_index);
+   zmq_point_pos = 0;
+   zmq_point[zmq_point_pos++] = '{';
+   zmq_point_pos += sprintf(&zmq_point[zmq_point_pos], "\"Measurement\":\"%s%s_%hhu_%hu\"", arguments.prefix, var_type, slot, var_index);
+   zmq_point_pos += sprintf(&zmq_point[zmq_point_pos], ",\"Timestamp\"=%lld", timestamp);
+   memcpy(&zmq_point[zmq_point_pos], ",\"value\"=", 9);
+   zmq_point_pos += 9;
+   memcpy(&zmq_point[zmq_point_pos], value, value_len);
+   zmq_point_pos += value_len;
+   zmq_point_pos += sprintf(&zmq_point[zmq_point_pos], ",\"ControllerName\"=\"%s\"", arguments.controller_name);
+   zmq_point_pos += sprintf(&zmq_point[zmq_point_pos], ",\"DataType\"=\"%s\"", var_type);
+   zmq_point_pos += sprintf(&zmq_point[zmq_point_pos], ",\"Global1\"=\"%s\"", "0");
+   zmq_point_pos += sprintf(&zmq_point[zmq_point_pos], ",\"Global2\"=\"%s\"", "0");
+   zmq_point_pos += sprintf(&zmq_point[zmq_point_pos], ",\"LineMode\"=\"%s\"", "0");
+   zmq_point_pos += sprintf(&zmq_point[zmq_point_pos], ",\"LineName\"=\"%s\"", arguments.line_name);
+   zmq_point_pos += sprintf(&zmq_point[zmq_point_pos], ",\"LineState\"=\"%s\"", "0");
+   zmq_point_pos += sprintf(&zmq_point[zmq_point_pos], ",\"ProgramName\"=\"%s\"", arguments.program_name);
+   zmq_point_pos += sprintf(&zmq_point[zmq_point_pos], ",\"ReferenceName\"=\"%s%s_%hhu_%hu\"", arguments.prefix, var_type, slot, var_index);
+   zmq_point_pos += sprintf(&zmq_point[zmq_point_pos], ",\"TagDescription\"=\"%s%s_%hhu_%hu\"", arguments.prefix, var_type, slot, var_index);
+   zmq_point_pos += sprintf(&zmq_point[zmq_point_pos], ",\"TimeShift1\"=\"%s\"", "0");
+   zmq_point_pos += sprintf(&zmq_point[zmq_point_pos], ",\"TimeShift2\"=\"%s\"", "0");
+   zmq_point_pos += sprintf(&zmq_point[zmq_point_pos], ",\"UserFilter1\"=\"%s\"", "Reserved1");
+   zmq_point_pos += sprintf(&zmq_point[zmq_point_pos], ",\"UserFilter2\"=\"%s\"", "Reserved2");
+   zmq_point[zmq_point_pos++] = '}';
+
+   zmq_send(zmq_pub, zmq_topic, zmq_topic_pos, ZMQ_SNDMORE);
+   zmq_send(zmq_pub, zmq_point, zmq_point_pos, 0);
+}
+
+void enqueue_init() {
+   influx_init();
+   zmqp_init();
+}
+
+void enqueue_raw(char* measurement, char* value, uint8_t value_len, int64_t timestamp)
+{
+   influx_enqueue_raw(measurement, value, value_len, timestamp);
+   zmqp_enqueue_raw(measurement, value, value_len, timestamp);
+}
+
+void enqueue(char* var_type, uint8_t slot, uint16_t var_index, char* value, uint8_t value_len, int64_t timestamp)
+{
+   influx_enqueue(var_type, slot, var_index, value, value_len, timestamp);
+   zmqp_enqueue(var_type, slot, var_index, value, value_len, timestamp);
+}
+
 void pn_main(void * arg)
 {
    int            ret = -1;
@@ -942,28 +1043,29 @@ void pn_main(void * arg)
    uint8_t        outputdata_iops;
    uint16_t       outputdata_length;
    bool           outputdata_is_updated = false;
+
    struct timeval tv;
    int64_t        timestamp;
-
    int64_t        timestamp_last;
    time_t         last_stats;
-   uint64_t       loop_interval_sum;
-   uint32_t       loop_interval_count;
-   uint32_t       loop_interval_max;
-   uint32_t       loop_interval_alltimemax;
-   uint64_t       loop_duration_sum;
-   uint32_t       loop_duration_count;
-   uint32_t       loop_duration_max;
-   uint32_t       loop_duration_alltimemax;
+   uint64_t       loop_interval_sum = 0;
+   uint32_t       loop_interval_count = 0;
+   uint32_t       loop_interval_max = 0;
+   uint32_t       loop_interval_alltimemax = 0;
+   uint64_t       loop_duration_sum = 0;
+   uint32_t       loop_duration_count = 0;
+   uint32_t       loop_duration_max = 0;
+   uint32_t       loop_duration_alltimemax = 0;
 
    printf("Connecting to Historian\n");
 
-   influx_init();
+   enqueue_init();
 
    printf("Waiting for connect request from IO-controller\n");
 
    gettimeofday(&tv, NULL);
    last_stats = tv.tv_sec;
+   timestamp_last = tv.tv_sec * 1000000LL + tv.tv_usec;
 
    /* Main loop */
    for (;;)
@@ -1017,23 +1119,38 @@ void pn_main(void * arg)
             // persist and reset stats every 10 seconds
             if (tv.tv_sec - last_stats > 10) {
                value_str_len = sprintf(value_str, "%lf", (double)loop_interval_sum / (double)loop_interval_count);
-               influx_enqueue_raw("stats_interval_avg", value_str, value_str_len, timestamp);
+               enqueue_raw("stats_interval_avg", value_str, value_str_len, timestamp);
+               value_str_len = sprintf(value_str, "%lf", (double)loop_interval_count);
+               enqueue_raw("stats_interval_count", value_str, value_str_len, timestamp);
                value_str_len = sprintf(value_str, "%lf", (double)loop_interval_max);
-               influx_enqueue_raw("stats_interval_max", value_str, value_str_len, timestamp);
+               enqueue_raw("stats_interval_max", value_str, value_str_len, timestamp);
                value_str_len = sprintf(value_str, "%lf", (double)loop_interval_alltimemax);
-               influx_enqueue_raw("stats_interval_alltimemax", value_str, value_str_len, timestamp);
+               enqueue_raw("stats_interval_alltimemax", value_str, value_str_len, timestamp);
                value_str_len = sprintf(value_str, "%lf", (double)loop_duration_sum / (double)loop_duration_count);
-               influx_enqueue_raw("stats_duration_avg", value_str, value_str_len, timestamp);
+               enqueue_raw("stats_duration_avg", value_str, value_str_len, timestamp);
+               value_str_len = sprintf(value_str, "%lf", (double)loop_duration_count);
+               enqueue_raw("stats_duration_count", value_str, value_str_len, timestamp);
                value_str_len = sprintf(value_str, "%lf", (double)loop_duration_max);
-               influx_enqueue_raw("stats_duration_max", value_str, value_str_len, timestamp);
+               enqueue_raw("stats_duration_max", value_str, value_str_len, timestamp);
                value_str_len = sprintf(value_str, "%lf", (double)loop_duration_alltimemax);
-               influx_enqueue_raw("stats_duration_alltimemax", value_str, value_str_len, timestamp);
+               enqueue_raw("stats_duration_alltimemax", value_str, value_str_len, timestamp);
+               value_str_len = sprintf(value_str, "%lf", (double)influx_duration_sum / (double)influx_duration_count);
+               enqueue_raw("stats_influx_avg", value_str, value_str_len, timestamp);
+               value_str_len = sprintf(value_str, "%lf", (double)influx_duration_count);
+               enqueue_raw("stats_influx_count", value_str, value_str_len, timestamp);
+               value_str_len = sprintf(value_str, "%lf", (double)influx_duration_max);
+               enqueue_raw("stats_influx_max", value_str, value_str_len, timestamp);
+               value_str_len = sprintf(value_str, "%lf", (double)influx_duration_alltimemax);
+               enqueue_raw("stats_influx_alltimemax", value_str, value_str_len, timestamp);
                loop_interval_sum = 0;
                loop_interval_count = 0;
                loop_interval_max = 0;
                loop_duration_sum = 0;
                loop_duration_count = 0;
                loop_duration_max = 0;
+               influx_duration_sum = 0;
+               influx_duration_count = 0;
+               influx_duration_max = 0;
                last_stats = tv.tv_sec;
             }
 
@@ -1076,7 +1193,7 @@ void pn_main(void * arg)
                               if ((state[slot][var_bytepos] & var_bitmask) != (outputdata[var_bytepos] & var_bitmask))
                               {
                                  value_str_len = sprintf(value_str, "%hhu", outputdata[var_bytepos] & var_bitmask > 0 ? 1 : 0);
-                                 influx_enqueue("b", slot, var_index, value_str, value_str_len, timestamp);
+                                 enqueue("b", slot, var_index, value_str, value_str_len, timestamp);
                                  if (verbosity > 0) {
                                     // value_str[1] = '\0';
                                     printf("Changing b_%d_%d to %s\n", slot, var_index, value_str);
@@ -1094,7 +1211,7 @@ void pn_main(void * arg)
                               if (memcmp(&state[slot][var_bytepos], &outputdata[var_bytepos], var_bytelen) != 0) {
                                  // ToDo: complain if session endianness is not little endian
                                  value_str_len = sprintf(value_str, "%hhu", ((uint8_t *)&outputdata[var_bytepos])[0]);
-                                 influx_enqueue("u8", slot, var_index, value_str, value_str_len, timestamp);
+                                 enqueue("u8", slot, var_index, value_str, value_str_len, timestamp);
                                  if (verbosity > 0)
                                     printf("Changing u8_%d_%d to %s\n", slot, var_index, value_str);
                               }
@@ -1105,7 +1222,7 @@ void pn_main(void * arg)
                               if (memcmp(&state[slot][var_bytepos], &outputdata[var_bytepos], var_bytelen) != 0) {
                                  // ToDo: complain if session endianness is not little endian
                                  value_str_len = sprintf(value_str, "%hu", ((uint16_t *)&outputdata[var_bytepos])[0]);
-                                 influx_enqueue("u16", slot, var_index, value_str, value_str_len, timestamp);
+                                 enqueue("u16", slot, var_index, value_str, value_str_len, timestamp);
                                  if (verbosity > 0)
                                     printf("Changing u16_%d_%d to %s\n", slot, var_index, value_str);
                               }
@@ -1116,7 +1233,7 @@ void pn_main(void * arg)
                               if (memcmp(&state[slot][var_bytepos], &outputdata[var_bytepos], var_bytelen) != 0) {
                                  // ToDo: complain if session endianness is not little endian
                                  value_str_len = sprintf(value_str, "%lu", ((uint32_t *)&outputdata[var_bytepos])[0]);
-                                 influx_enqueue("u32", slot, var_index, value_str, value_str_len, timestamp);
+                                 enqueue("u32", slot, var_index, value_str, value_str_len, timestamp);
                                  if (verbosity > 0)
                                     printf("Changing u32_%d_%d to %s\n", slot, var_index, value_str);
                               }
@@ -1127,7 +1244,7 @@ void pn_main(void * arg)
                               if (memcmp(&state[slot][var_bytepos], &outputdata[var_bytepos], var_bytelen) != 0) {
                                  // ToDo: complain if session endianness is not little endian
                                  value_str_len = sprintf(value_str, "%llu", ((uint64_t *)&outputdata[var_bytepos])[0]);
-                                 influx_enqueue("u64", slot, var_index, value_str, value_str_len, timestamp);
+                                 enqueue("u64", slot, var_index, value_str, value_str_len, timestamp);
                                  if (verbosity > 0)
                                     printf("Changing u64_%d_%d to %s\n", slot, var_index, value_str);
                               }
@@ -1138,7 +1255,7 @@ void pn_main(void * arg)
                               if (memcmp(&state[slot][var_bytepos], &outputdata[var_bytepos], var_bytelen) != 0) {
                                  // ToDo: complain if session endianness is not little endian
                                  value_str_len = sprintf(value_str, "%hhi", ((int8_t *)&outputdata[var_bytepos])[0]);
-                                 influx_enqueue("i8", slot, var_index, value_str, value_str_len, timestamp);
+                                 enqueue("i8", slot, var_index, value_str, value_str_len, timestamp);
                                  if (verbosity > 0)
                                     printf("Changing i8_%d_%d to %s\n", slot, var_index, value_str);
                               }
@@ -1149,7 +1266,7 @@ void pn_main(void * arg)
                               if (memcmp(&state[slot][var_bytepos], &outputdata[var_bytepos], var_bytelen) != 0) {
                                  // ToDo: complain if session endianness is not little endian
                                  value_str_len = sprintf(value_str, "%hi", ((int16_t *)&outputdata[var_bytepos])[0]);
-                                 influx_enqueue("i16", slot, var_index, value_str, value_str_len, timestamp);
+                                 enqueue("i16", slot, var_index, value_str, value_str_len, timestamp);
                                  if (verbosity > 0)
                                     printf("Changing i16_%d_%d to %s\n", slot, var_index, value_str);
                               }
@@ -1160,7 +1277,7 @@ void pn_main(void * arg)
                               if (memcmp(&state[slot][var_bytepos], &outputdata[var_bytepos], var_bytelen) != 0) {
                                  // ToDo: complain if session endianness is not little endian
                                  value_str_len = sprintf(value_str, "%li", ((int32_t *)&outputdata[var_bytepos])[0]);
-                                 influx_enqueue("i32", slot, var_index, value_str, value_str_len, timestamp);
+                                 enqueue("i32", slot, var_index, value_str, value_str_len, timestamp);
                                  if (verbosity > 0)
                                     printf("Changing i32_%d_%d to %s\n", slot, var_index, value_str);
                               }
@@ -1171,7 +1288,7 @@ void pn_main(void * arg)
                               if (memcmp(&state[slot][var_bytepos], &outputdata[var_bytepos], var_bytelen) != 0) {
                                  // ToDo: complain if session endianness is not little endian
                                  value_str_len = sprintf(value_str, "%lli", ((int64_t *)&outputdata[var_bytepos])[0]);
-                                 influx_enqueue("i64", slot, var_index, value_str, value_str_len, timestamp);
+                                 enqueue("i64", slot, var_index, value_str, value_str_len, timestamp);
                                  if (verbosity > 0)
                                     printf("Changing i64_%d_%d to %s\n", slot, var_index, value_str);
                               }
@@ -1183,7 +1300,7 @@ void pn_main(void * arg)
                                  // ToDo: complain if session floating point representation is not IEEE
                                  uint32_t temp = htonl(((uint32_t *)&outputdata[var_bytepos])[0]);
                                  value_str_len = sprintf(value_str, "%f", *(float*)&temp);
-                                 influx_enqueue("f32", slot, var_index, value_str, value_str_len, timestamp);
+                                 enqueue("f32", slot, var_index, value_str, value_str_len, timestamp);
                                  if (verbosity > 0)
                                     printf("Changing f32_%d_%d to %s\n", slot, var_index, value_str);
                               }
@@ -1195,7 +1312,7 @@ void pn_main(void * arg)
                                  // ToDo: complain if session floating point representation is not IEEE
                                  uint64_t temp = htonl(((uint64_t *)&outputdata[var_bytepos])[0]);
                                  value_str_len = sprintf(value_str, "%lf", *(double*)&temp);
-                                 influx_enqueue("f64", slot, var_index, value_str, value_str_len, timestamp);
+                                 enqueue("f64", slot, var_index, value_str, value_str_len, timestamp);
                                  if (verbosity > 0)
                                     printf("Changing f64_%d_%d to %s\n", slot, var_index, value_str);
                               }
