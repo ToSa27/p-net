@@ -45,10 +45,13 @@ static int app_alarm_ack_cnf(uint32_t arep, int res);
 #define PNET_MAX_OUTPUT_LEN            1440        /* org 256 */
 
 #define IP_INVALID                     0
+
 #define APP_DEFAULT_ETHERNET_INTERFACE "eth0"
 #define APP_DEFAULT_LINE_NAME          "Line1"
 #define APP_DEFAULT_CONTROLLER_NAME    "PLC1"
 #define APP_DEFAULT_PROGRAM_NAME       "Program1"
+#define APP_DEFAULT_INFLUX_HOST        "127.0.0.1"
+#define APP_DEFAULT_INFLUX_PORT        8089
 #define APP_DEFAULT_PREFIX             ""
 
 
@@ -691,6 +694,8 @@ void show_usage()
    printf("   -l NAME        Set line name. Default is %s\n", APP_DEFAULT_LINE_NAME);
    printf("   -c NAME        Set controller name. Default is %s\n", APP_DEFAULT_CONTROLLER_NAME);
    printf("   -p NAME        Set program name. Default is %s\n", APP_DEFAULT_PROGRAM_NAME);
+   printf("   -d HOST        Set host for Influx database connection. Default is %s\n", APP_DEFAULT_INFLUX_HOST);
+   printf("   -e PORT        Set port for Influx database connection. Default is %d\n", APP_DEFAULT_INFLUX_PORT);
    printf("   -x PREFIX      Set prefix for measurement names written to Influx. Default is %s\n", APP_DEFAULT_PREFIX);
 }
 
@@ -700,6 +705,8 @@ struct cmd_args {
    char line_name[32];
    char controller_name[32];
    char program_name[64];
+   char influx_host[64];
+   uint16_t influx_port;
    char prefix[16];
    int  verbosity;
 };
@@ -730,6 +737,8 @@ struct cmd_args parse_commandline_arguments(int argc, char *argv[])
    strcpy(output_arguments.line_name, APP_DEFAULT_LINE_NAME);
    strcpy(output_arguments.controller_name, APP_DEFAULT_CONTROLLER_NAME);
    strcpy(output_arguments.program_name, APP_DEFAULT_PROGRAM_NAME);
+   strcpy(output_arguments.influx_host, APP_DEFAULT_INFLUX_HOST);
+   output_arguments.influx_port = APP_DEFAULT_INFLUX_PORT;
    strcpy(output_arguments.prefix, APP_DEFAULT_PREFIX);
    output_arguments.verbosity = 0;
 
@@ -753,6 +762,12 @@ struct cmd_args parse_commandline_arguments(int argc, char *argv[])
          break;
       case 'p':
          strcpy(output_arguments.program_name, optarg);
+         break;
+      case 'd':
+         strcpy(output_arguments.influx_host, optarg);
+         break;
+      case 'e':
+         output_arguments.influx_port = atoi(optarg);
          break;
       case 'x':
          strcpy(output_arguments.prefix, optarg);
@@ -796,8 +811,6 @@ void print_ip_address(uint32_t ip){
    );
 }
 
-char* influx_host = "127.0.0.1";
-uint16_t influx_port = 8089;
 struct sockaddr_in influx_addr;
 int influx_socket;
 char influx_prefix[1000];
@@ -809,20 +822,12 @@ uint32_t influx_buffer_pos = 0;
 
 void influx_init()
 {
-   if (verbosity > 0)
-   {
-      printf("Influx Init\n");
-   }
-
-   // influx_client.host = "localhost";
-   // influx_client.port = 8089;
-
    influx_buffer_pos = 0;
    influx_prefix_pos = 0;
 
    influx_addr.sin_family = AF_INET;
-   influx_addr.sin_addr.s_addr = inet_addr(influx_host);  // ToDo - that's optimistic, add some error handling
-   influx_addr.sin_port = htons(influx_port);
+   influx_addr.sin_addr.s_addr = inet_addr(arguments.influx_host);
+   influx_addr.sin_port = htons(arguments.influx_port);
    influx_socket = socket(AF_INET, SOCK_DGRAM, 0);
    if (influx_socket == -1)
       printf("ERROR creating socket!\n");
@@ -840,8 +845,48 @@ void influx_submit()
    influx_buffer_pos = 0;
 }
 
+void influx_enqueue_raw(char* measurement, char* value, uint8_t value_len, int64_t timestamp)
+{
+   if (verbosity > 1)
+   {
+      value[value_len] = '\0';
+      printf("Influx Enqueue Raw: %s -> %s\n", measurement, value);
+   }
+   influx_point_pos = 0;
+   influx_point_pos += sprintf(&influx_point[influx_point_pos], "%s", measurement);
+   influx_point_pos += sprintf(&influx_point[influx_point_pos], ",ControllerName=%s", arguments.controller_name);
+   influx_point_pos += sprintf(&influx_point[influx_point_pos], ",ProgramName=%s", arguments.program_name);
+   influx_point_pos += sprintf(&influx_point[influx_point_pos], ",ReferenceName=%s", measurement);
+   influx_point_pos += sprintf(&influx_point[influx_point_pos], ",TagDescription=%s", measurement);
+   memcpy(&influx_point[influx_point_pos], " value=", 7);
+   influx_point_pos += 7;
+   memcpy(&influx_point[influx_point_pos], value, value_len);
+   influx_point_pos += value_len;
+   influx_point[influx_point_pos++] = ' ';
+   char ts[30];
+   sprintf(ts, "%lld", timestamp);
+   memcpy(&influx_point[influx_point_pos], ts, strlen(ts));
+   influx_point_pos += strlen(ts);
+   influx_point[influx_point_pos++] = '\n';
+   if (sizeof(influx_buffer) - influx_buffer_pos < influx_prefix_pos + influx_point_pos)
+      influx_submit();
+   memcpy(&influx_buffer[influx_buffer_pos], influx_prefix, influx_prefix_pos);
+   influx_buffer_pos += influx_prefix_pos;
+   memcpy(&influx_buffer[influx_buffer_pos], influx_point, influx_point_pos);
+   influx_buffer_pos += influx_point_pos;
+   if (verbosity > 1)
+   {
+      printf("Influx Enqueue new pos: %ld\n", influx_buffer_pos);
+   }
+}
+
 void influx_enqueue(char* var_type, uint8_t slot, uint16_t var_index, char* value, uint8_t value_len, int64_t timestamp)
 {
+   if (verbosity > 1)
+   {
+      value[value_len] = '\0';
+      printf("Influx Enqueue: %s / %d / %d -> %s\n", var_type, slot, var_index, value);
+   }
    influx_point_pos = 0;
    influx_point_pos += sprintf(&influx_point[influx_point_pos], "%s%s_%hhu_%hu", arguments.prefix, var_type, slot, var_index);
    influx_point_pos += sprintf(&influx_point[influx_point_pos], ",ControllerName=%s", arguments.controller_name);
@@ -899,19 +944,26 @@ void pn_main(void * arg)
    bool           outputdata_is_updated = false;
    struct timeval tv;
    int64_t        timestamp;
-   int64_t        timestamp_last;
 
-   if (verbosity > 0)
-   {
-      printf("Connecting to Historian\n");
-   }
+   int64_t        timestamp_last;
+   time_t         last_stats;
+   uint64_t       loop_interval_sum;
+   uint32_t       loop_interval_count;
+   uint32_t       loop_interval_max;
+   uint32_t       loop_interval_alltimemax;
+   uint64_t       loop_duration_sum;
+   uint32_t       loop_duration_count;
+   uint32_t       loop_duration_max;
+   uint32_t       loop_duration_alltimemax;
+
+   printf("Connecting to Historian\n");
 
    influx_init();
 
-   if (verbosity > 0)
-   {
-      printf("Waiting for connect request from IO-controller\n");
-   }
+   printf("Waiting for connect request from IO-controller\n");
+
+   gettimeofday(&tv, NULL);
+   last_stats = tv.tv_sec;
 
    /* Main loop */
    for (;;)
@@ -957,10 +1009,41 @@ void pn_main(void * arg)
          if (main_arep != UINT32_MAX)
          {
 
-            timestamp_last = timestamp;
+//            timestamp_last = timestamp;
             // ToDo : fetch timestamp from msg
             gettimeofday(&tv, NULL);
             timestamp = tv.tv_sec * 1000000LL + tv.tv_usec;
+
+            // persist and reset stats every 10 seconds
+            if (tv.tv_sec - last_stats > 10) {
+               value_str_len = sprintf(value_str, "%lf", (double)loop_interval_sum / (double)loop_interval_count);
+               influx_enqueue_raw("stats_interval_avg", value_str, value_str_len, timestamp);
+               value_str_len = sprintf(value_str, "%lf", (double)loop_interval_max);
+               influx_enqueue_raw("stats_interval_max", value_str, value_str_len, timestamp);
+               value_str_len = sprintf(value_str, "%lf", (double)loop_interval_alltimemax);
+               influx_enqueue_raw("stats_interval_alltimemax", value_str, value_str_len, timestamp);
+               value_str_len = sprintf(value_str, "%lf", (double)loop_duration_sum / (double)loop_duration_count);
+               influx_enqueue_raw("stats_duration_avg", value_str, value_str_len, timestamp);
+               value_str_len = sprintf(value_str, "%lf", (double)loop_duration_max);
+               influx_enqueue_raw("stats_duration_max", value_str, value_str_len, timestamp);
+               value_str_len = sprintf(value_str, "%lf", (double)loop_duration_alltimemax);
+               influx_enqueue_raw("stats_duration_alltimemax", value_str, value_str_len, timestamp);
+               loop_interval_sum = 0;
+               loop_interval_count = 0;
+               loop_interval_max = 0;
+               loop_duration_sum = 0;
+               loop_duration_count = 0;
+               loop_duration_max = 0;
+               last_stats = tv.tv_sec;
+            }
+
+            loop_interval_sum += (timestamp - timestamp_last);
+            loop_interval_count++;
+            if (timestamp - timestamp_last > loop_interval_max) {
+               loop_interval_max = timestamp - timestamp_last;
+               if (timestamp - timestamp_last > loop_interval_alltimemax)
+                  loop_interval_alltimemax = timestamp - timestamp_last;
+            }
 
             for (slot = 0; slot < PNET_MAX_MODULES; slot++)
             {
@@ -997,7 +1080,7 @@ void pn_main(void * arg)
                                  if (verbosity > 0) {
                                     // value_str[1] = '\0';
                                     printf("Changing b_%d_%d to %s\n", slot, var_index, value_str);
-                                 } 
+                                 }
                               }
                               if (var_bitmask == 0b10000000) {
                                  var_bytepos++;
@@ -1129,8 +1212,18 @@ void pn_main(void * arg)
                }
             }
 
+            timestamp_last = timestamp;
+            gettimeofday(&tv, NULL);
+            timestamp = tv.tv_sec * 1000000LL + tv.tv_usec;
+            loop_duration_sum += (timestamp - timestamp_last);
+            loop_duration_count++;
+            if (timestamp - timestamp_last > loop_duration_max) {
+               loop_duration_max = timestamp - timestamp_last;
+               if (timestamp - timestamp_last > loop_duration_alltimemax)
+                  loop_duration_alltimemax = timestamp - timestamp_last;
+            }
+
             if (verbosity > 1) {
-               gettimeofday(&tv, NULL);
                printf("rt: % 10d / % 10d\n", timestamp - timestamp_last, tv.tv_sec * 1000000LL + tv.tv_usec - timestamp);
             }
             // ProfilerStop();
@@ -1146,9 +1239,7 @@ void pn_main(void * arg)
          alarm_allowed = true;
          os_event_clr(main_events, EVENT_ABORT); /* Re-arm */
          if (verbosity > 0)
-         {
             printf("Aborting the application\n");
-         }
       }
    }
    os_timer_destroy(main_timer);
@@ -1163,17 +1254,16 @@ int main(int argc, char *argv[])
    /* Parse and display command line arguments */
    arguments = parse_commandline_arguments(argc, argv);
    verbosity = arguments.verbosity;  // Global variable for use in callbacks
-   printf("\n** Starting Profinet demo application **\n");
-   if (verbosity > 0)
-   {
-      printf("Verbosity level:    %u\n", verbosity);
-      printf("Ethernet interface: %s\n", arguments.eth_interface);
-      printf("Station name:       %s\n", arguments.station_name);
-      printf("Line name:          %s\n", arguments.line_name);
-      printf("Controller name:    %s\n", arguments.controller_name);
-      printf("Program name:       %s\n", arguments.program_name);
-      printf("Prefix:             %s\n", arguments.prefix);
-   }
+   printf("\n** Starting P&G high speed Profinet Historian IO **\n");
+   printf("Verbosity level:    %u\n", verbosity);
+   printf("Ethernet interface: %s\n", arguments.eth_interface);
+   printf("Station name:       %s\n", arguments.station_name);
+   printf("Line name:          %s\n", arguments.line_name);
+   printf("Controller name:    %s\n", arguments.controller_name);
+   printf("Program name:       %s\n", arguments.program_name);
+   printf("Influx host:        %s\n", arguments.influx_host);
+   printf("Influx port:        %d\n", arguments.influx_port);
+   printf("Prefix:             %s\n", arguments.prefix);
 
    /* Read IP, netmask and gateway */
    if (if_nametoindex(arguments.eth_interface) == 0)
@@ -1209,23 +1299,20 @@ int main(int argc, char *argv[])
       exit(EXIT_CODE_ERROR);
    }
 
-   if (verbosity > 0)
-   {
-      printf("IP address:         ");
-      print_ip_address(ip_int);
-      printf("\nNetmask:            ");
-      print_ip_address(netmask_int);
-      printf("\nGateway:            ");
-      print_ip_address(gateway_ip_int);
-      printf("\nMAC address:        %02X:%02X:%02X:%02X:%02X:%02X",
-         macbuffer[0],
-         macbuffer[1],
-         macbuffer[2],
-         macbuffer[3],
-         macbuffer[4],
-         macbuffer[5]);
-      printf("\n\n");
-   }
+   printf("IP address:         ");
+   print_ip_address(ip_int);
+   printf("\nNetmask:            ");
+   print_ip_address(netmask_int);
+   printf("\nGateway:            ");
+   print_ip_address(gateway_ip_int);
+   printf("\nMAC address:        %02X:%02X:%02X:%02X:%02X:%02X",
+      macbuffer[0],
+      macbuffer[1],
+      macbuffer[2],
+      macbuffer[3],
+      macbuffer[4],
+      macbuffer[5]);
+   printf("\n\n");
 
    /* Set IP and gateway */
    strcpy(pnet_default_cfg.im_0_data.order_id, "12345");
