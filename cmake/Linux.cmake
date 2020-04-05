@@ -35,10 +35,13 @@ target_sources(profinet
 
 target_compile_options(profinet
   PRIVATE
+  -O3
   -Wall
   -Wextra
   -Werror
   -Wno-unused-parameter
+  -finline-functions
+  -pg
   INTERFACE
   $<$<CONFIG:Coverage>:--coverage>
   )
@@ -75,7 +78,18 @@ target_link_libraries(hist_io
   PUBLIC
   pthread
   zmq
-)
+  )
+
+target_compile_options(profinet
+  PRIVATE
+  -O3
+  -Wall
+  -Wextra
+  -Werror
+  -Wno-unused-parameter
+  -finline-functions
+  -pg
+  )
 
 if (BUILD_TESTING)
   set(GOOGLE_TEST_INDIVIDUAL TRUE)
