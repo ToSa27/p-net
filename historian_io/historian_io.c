@@ -1,3 +1,9 @@
+#define PROFILING
+//#define LIMIT_VOLUME
+#define INFLUX_PERSIST
+//#define ZMQ_PERSIST
+//#define INFLUX_SUBMIT_THREAD
+
 #ifdef PROFILING
 #define _GNU_SOURCE
 #include <signal.h>
@@ -8,12 +14,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
 #include <arpa/inet.h>
 #include <net/if.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+
+#ifdef ZMQ_PERSIST
 #include <zmq.h>
+#endif
 
 #include <pnet_api.h>
 #include "osal.h"
@@ -41,7 +51,9 @@ static int app_alarm_ack_cnf(pnet_t *net, void *arg, uint32_t arep, int res);
 #define EVENT_READY_FOR_DATA           BIT(0)
 #define EVENT_TIMER                    BIT(1)
 #define EVENT_ALARM                    BIT(2)
+#ifdef INFLUX_SUBMIT_THREAD
 #define EVENT_READY_FOR_SUBMIT         BIT(8)
+#endif
 #define EVENT_ABORT                    BIT(15)
 #define EXIT_CODE_ERROR                1
 
@@ -51,21 +63,28 @@ static int app_alarm_ack_cnf(pnet_t *net, void *arg, uint32_t arep, int res);
 #define APP_MAIN_SLEEPTIME_US          5*1000*1000
 #define PNET_MAX_OUTPUT_LEN            1440        /* org 256 */
 
+#define MAX_STATE_TAGS                 5
+
+#ifdef INFLUX_SUBMIT_THREAD
 #define INFLUX_PRIORITY                25
 #define INFLUX_STACKSIZE               4096
-#define INFLUX_BUFFER_SIZE             65535
+#endif
+#define INFLUX_BUFFER_SIZE             65500
 #define INFLUX_BUFFER_COUNT            5
 
 #define IP_INVALID                     0
 
 #define APP_DEFAULT_ETHERNET_INTERFACE "eth0"
 #define APP_DEFAULT_LINE_NAME          "Line1"
+#define APP_DEFAULT_LINE_MODE_TAG      "---"
+#define APP_DEFAULT_LINE_STATE_TAG     "---"
 #define APP_DEFAULT_CONTROLLER_NAME    "PLC1"
 #define APP_DEFAULT_PROGRAM_NAME       "Program1"
 #define APP_DEFAULT_INFLUX_HOST        "127.0.0.1"
 #define APP_DEFAULT_INFLUX_PORT        8089
 #define APP_DEFAULT_ZMQ_PORT           5555
 #define APP_DEFAULT_PREFIX             ""
+#define APP_DEFAULT_RUNTIME            0
 
 
 /**************** From the GSDML file ****************************************/
@@ -159,6 +178,9 @@ struct cmd_args {
    char     controller_name[32];
    char     program_name[64];
    char     prefix[16];
+   char     line_mode_tag[64];
+   char     line_state_tag[64];
+   uint64_t runtime;
    int      verbosity;
 };
 
@@ -169,20 +191,27 @@ struct influx_config
    uint32_t           max_packet_size;
    struct sockaddr_in addr;
    int                socket;
+   char               common[1000];
+   uint16_t           common_len;
+   // ToDo: split fixed per tag
    char               fixed[1000];
    uint16_t           fixed_len;
+   char               state[1000];
+   uint16_t           state_len;
    char               buffer[INFLUX_BUFFER_COUNT][INFLUX_BUFFER_SIZE];
    uint32_t           buffer_pos[INFLUX_BUFFER_COUNT];
    uint8_t            write_buffer;
    uint8_t            read_buffer;
 };
 
+#ifdef ZMQ_PERSIST
 struct zmq_config
 {
    uint16_t port;
    void *   context;
    void *   pub;
 };
+#endif
 
 struct statistics
 {
@@ -201,13 +230,23 @@ typedef struct app_data_obj
    struct cmd_args           arguments;
    struct statistics         stats_duration;
    struct statistics         stats_interval;
+#ifdef INFLUX_PERSIST
    struct statistics         stats_influx;
-   struct statistics         stats_influx_enqueue;
-   struct statistics         stats_zmq_enqueue;
+   struct statistics         stats_influx_push;
    struct influx_config      influx;
+#endif
+#ifdef ZMQ_PERSIST
+   struct statistics         stats_zmq_push;
    struct zmq_config         zmq;
+#endif
    uint16_t                  custom_modules[PNET_MAX_MODULES];
    uint8_t                   state[PNET_MAX_MODULES][PNET_MAX_OUTPUT_LEN];
+   uint8_t                   state_tag_count;
+   char                      state_names[MAX_STATE_TAGS][20];
+   char                      state_tags[MAX_STATE_TAGS][20];
+   char                      state_values[MAX_STATE_TAGS][20];
+//   char                      line_mode[20];
+//   char                      line_state[20];
 } app_data_t;
 
 typedef struct app_data_and_stack_obj
@@ -813,12 +852,15 @@ void show_usage()
    printf("   -i INTERF      Set Ethernet interface name. Defaults to %s\n", APP_DEFAULT_ETHERNET_INTERFACE);
    printf("   -s NAME        Set station name. Defaults to %s\n", APP_DEFAULT_STATION_NAME);
    printf("   -l NAME        Set line name. Default is %s\n", APP_DEFAULT_LINE_NAME);
+   printf("   -m NAME        Set line mode tag. Default is %s\n", APP_DEFAULT_LINE_MODE_TAG);
+   printf("   -t NAME        Set line state tag. Default is %s\n", APP_DEFAULT_LINE_STATE_TAG);
    printf("   -c NAME        Set controller name. Default is %s\n", APP_DEFAULT_CONTROLLER_NAME);
    printf("   -p NAME        Set program name. Default is %s\n", APP_DEFAULT_PROGRAM_NAME);
    printf("   -d HOST        Set host for Influx database connection. Default is %s\n", APP_DEFAULT_INFLUX_HOST);
    printf("   -e PORT        Set port for Influx database connection. Set to 0 to disable Influx interface. Default is %d\n", APP_DEFAULT_INFLUX_PORT);
    printf("   -z PORT        Set port for 0MQ connection. Set to 0 to disable 0MQ interface. Default is %d\n", APP_DEFAULT_ZMQ_PORT);
    printf("   -x PREFIX      Set prefix for measurement names written to Influx. Default is %s\n", APP_DEFAULT_PREFIX);
+   printf("   -r SECONDS     Force graceful end of program after given runtime in seconds (for profiling purposes only). Default is %d\n", APP_DEFAULT_RUNTIME);
 }
 
 /**
@@ -841,21 +883,28 @@ void parse_commandline_arguments(app_data_t *p_appdata, int argc, char *argv[])
 
    // Default values
    struct cmd_args output_arguments;
-   struct influx_config output_influx;
-   struct zmq_config output_zmq;
    strcpy(output_arguments.eth_interface, APP_DEFAULT_ETHERNET_INTERFACE);
    strcpy(output_arguments.station_name, APP_DEFAULT_STATION_NAME);
    strcpy(output_arguments.line_name, APP_DEFAULT_LINE_NAME);
+   strcpy(output_arguments.line_mode_tag, APP_DEFAULT_LINE_MODE_TAG);
+   strcpy(output_arguments.line_state_tag, APP_DEFAULT_LINE_STATE_TAG);
    strcpy(output_arguments.controller_name, APP_DEFAULT_CONTROLLER_NAME);
    strcpy(output_arguments.program_name, APP_DEFAULT_PROGRAM_NAME);
+   strcpy(output_arguments.prefix, APP_DEFAULT_PREFIX);
+   output_arguments.runtime = APP_DEFAULT_RUNTIME;
+#ifdef INFLUX_PERSIST
+   struct influx_config output_influx;
    strcpy(output_influx.host, APP_DEFAULT_INFLUX_HOST);
    output_influx.port = APP_DEFAULT_INFLUX_PORT;
+#endif
+#ifdef ZMQ_PERSIST
+   struct zmq_config output_zmq;
    output_zmq.port = APP_DEFAULT_ZMQ_PORT;
-   strcpy(output_arguments.prefix, APP_DEFAULT_PREFIX);
+#endif
    output_arguments.verbosity = 0;
 
    int option;
-   while ((option = getopt(argc, argv, "hvi:s:l:c:p:d:e:z:x:")) != -1) {
+   while ((option = getopt(argc, argv, "hvi:s:l:m:t:c:p:d:e:z:x:r:")) != -1) {
       switch (option) {
       case 'v':
          output_arguments.verbosity++;
@@ -869,6 +918,12 @@ void parse_commandline_arguments(app_data_t *p_appdata, int argc, char *argv[])
       case 'l':
          strcpy(output_arguments.line_name, optarg);
          break;
+      case 'm':
+         strcpy(output_arguments.line_mode_tag, optarg);
+         break;
+      case 't':
+         strcpy(output_arguments.line_state_tag, optarg);
+         break;
       case 'c':
          strcpy(output_arguments.controller_name, optarg);
          break;
@@ -876,16 +931,25 @@ void parse_commandline_arguments(app_data_t *p_appdata, int argc, char *argv[])
          strcpy(output_arguments.program_name, optarg);
          break;
       case 'd':
+#ifdef INFLUX_PERSIST
          strcpy(output_influx.host, optarg);
+#endif
          break;
       case 'e':
+#ifdef INFLUX_PERSIST
          output_influx.port = atoi(optarg);
+#endif
          break;
       case 'z':
+#ifdef ZMQ_PERSIST
          output_zmq.port = atoi(optarg);
+#endif
          break;
       case 'x':
          strcpy(output_arguments.prefix, optarg);
+         break;
+      case 'r':
+         output_arguments.runtime = atoi(optarg);
          break;
       case 'h':
       case '?':
@@ -895,8 +959,12 @@ void parse_commandline_arguments(app_data_t *p_appdata, int argc, char *argv[])
       }
    }
    p_appdata->arguments = output_arguments;
+#ifdef INFLUX_PERSIST
    p_appdata->influx = output_influx;
+#endif
+#ifdef ZMQ_PERSIST
    p_appdata->zmq = output_zmq;
+#endif
 }
 
 /**
@@ -938,7 +1006,7 @@ void collect_stats(struct statistics *stats, uint64_t duration)
    }
 }
 
-void enqueue_raw(app_data_t *p_appdata, char* measurement, char* value, int64_t timestamp);
+void push_raw(app_data_t *p_appdata, char* measurement, char* value, int64_t timestamp);
 
 void persist_stats(app_data_t *p_appdata, struct statistics *stats, char *name, uint64_t timestamp)
 {
@@ -948,22 +1016,24 @@ void persist_stats(app_data_t *p_appdata, struct statistics *stats, char *name, 
    if (stats->count > 0) {
       sprintf(value_str, "%lf", (double)stats->sum / (double)stats->count);
       sprintf(measurement, "stats_%s_avg", name);
-      enqueue_raw(p_appdata, measurement, value_str, timestamp);
+      push_raw(p_appdata, measurement, value_str, timestamp);
    }
-   sprintf(value_str, "%lf", (double)stats->count);
+   sprintf(value_str, "%ld", stats->count);
    sprintf(measurement, "stats_%s_count", name);
-   enqueue_raw(p_appdata, measurement, value_str, timestamp);
-   sprintf(value_str, "%lf", (double)stats->max);
+   push_raw(p_appdata, measurement, value_str, timestamp);
+   sprintf(value_str, "%ld", stats->max);
    sprintf(measurement, "stats_%s_max", name);
-   enqueue_raw(p_appdata, measurement, value_str, timestamp);
-   sprintf(value_str, "%lf", (double)stats->alltime_max);
+   push_raw(p_appdata, measurement, value_str, timestamp);
+   sprintf(value_str, "%ld", stats->alltime_max);
    sprintf(measurement, "stats_%s_alltimemax", name);
-   enqueue_raw(p_appdata, measurement, value_str, timestamp);
+   push_raw(p_appdata, measurement, value_str, timestamp);
+
    stats->sum = 0;
    stats->count = 0;
    stats->max = 0;
 }
 
+#ifdef INFLUX_PERSIST
 void influx_init(app_data_t *p_appdata)
 {
    p_appdata->influx.write_buffer = 0;
@@ -975,130 +1045,179 @@ void influx_init(app_data_t *p_appdata)
    p_appdata->influx.socket = socket(AF_INET, SOCK_DGRAM, 0);
    if (p_appdata->influx.socket == -1)
       printf("ERROR creating socket!\n");
-   
+   if (connect(p_appdata->influx.socket, 
+           (struct sockaddr *)&p_appdata->influx.addr, 
+           sizeof(p_appdata->influx.addr)) == -1)
+      printf("ERROR connecting socket!\n");
+
+   p_appdata->influx.common_len = 0;
+   p_appdata->influx.common_len += sprintf(&p_appdata->influx.common[p_appdata->influx.common_len], ",ControllerName=%s", p_appdata->arguments.controller_name);
+   p_appdata->influx.common_len += sprintf(&p_appdata->influx.common[p_appdata->influx.common_len], ",Global1=%s", "0");
+   p_appdata->influx.common_len += sprintf(&p_appdata->influx.common[p_appdata->influx.common_len], ",Global2=%s", "0");
+   p_appdata->influx.common_len += sprintf(&p_appdata->influx.common[p_appdata->influx.common_len], ",LineName=%s", p_appdata->arguments.line_name);
+   p_appdata->influx.common_len += sprintf(&p_appdata->influx.common[p_appdata->influx.common_len], ",ProgramName=%s", p_appdata->arguments.program_name);
+   p_appdata->influx.common_len += sprintf(&p_appdata->influx.common[p_appdata->influx.common_len], ",TimeShift1=%s", "0");
+   p_appdata->influx.common_len += sprintf(&p_appdata->influx.common[p_appdata->influx.common_len], ",TimeShift2=%s", "0");
+   p_appdata->influx.common_len += sprintf(&p_appdata->influx.common[p_appdata->influx.common_len], ",UserFilter1=%s", "Reserved1");
+   p_appdata->influx.common_len += sprintf(&p_appdata->influx.common[p_appdata->influx.common_len], ",UserFilter2=%s", "Reserved2");
+
    p_appdata->influx.fixed_len = 0;
-   p_appdata->influx.fixed_len += sprintf(&p_appdata->influx.fixed[p_appdata->influx.fixed_len], ",ControllerName=%s", p_appdata->arguments.controller_name);
-   p_appdata->influx.fixed_len += sprintf(&p_appdata->influx.fixed[p_appdata->influx.fixed_len], ",Global1=%s", "0");
-   p_appdata->influx.fixed_len += sprintf(&p_appdata->influx.fixed[p_appdata->influx.fixed_len], ",Global2=%s", "0");
-   p_appdata->influx.fixed_len += sprintf(&p_appdata->influx.fixed[p_appdata->influx.fixed_len], ",LineMode=%s", "0");
-   p_appdata->influx.fixed_len += sprintf(&p_appdata->influx.fixed[p_appdata->influx.fixed_len], ",LineName=%s", p_appdata->arguments.line_name);
-   p_appdata->influx.fixed_len += sprintf(&p_appdata->influx.fixed[p_appdata->influx.fixed_len], ",ProgramName=%s", p_appdata->arguments.program_name);
-   p_appdata->influx.fixed_len += sprintf(&p_appdata->influx.fixed[p_appdata->influx.fixed_len], ",TimeShift1=%s", "0");
-   p_appdata->influx.fixed_len += sprintf(&p_appdata->influx.fixed[p_appdata->influx.fixed_len], ",TimeShift2=%s", "0");
-   p_appdata->influx.fixed_len += sprintf(&p_appdata->influx.fixed[p_appdata->influx.fixed_len], ",UserFilter1=%s", "Reserved1");
-   p_appdata->influx.fixed_len += sprintf(&p_appdata->influx.fixed[p_appdata->influx.fixed_len], ",UserFilter2=%s", "Reserved2");
+   p_appdata->influx.fixed_len += sprintf(&p_appdata->influx.fixed[p_appdata->influx.fixed_len], ",DataType=%s", "BOOL");
+   p_appdata->influx.fixed_len += sprintf(&p_appdata->influx.fixed[p_appdata->influx.fixed_len], ",ReferenceName=%s", "---");
+   p_appdata->influx.fixed_len += sprintf(&p_appdata->influx.fixed[p_appdata->influx.fixed_len], ",TagDescription=%s", "---");
 }
 
+void influx_submit(app_data_t *p_appdata)
+{
+   struct timeval tv;
+   int64_t        timestamp_start;
+   int64_t        timestamp_finish;
+
+   while (p_appdata->influx.read_buffer != p_appdata->influx.write_buffer) {
+      gettimeofday(&tv, NULL);
+      timestamp_start = tv.tv_sec * 1000000LL + tv.tv_usec;
+
+/*
+      if (sendto(p_appdata->influx.socket, 
+                 p_appdata->influx.buffer[p_appdata->influx.read_buffer], 
+                 p_appdata->influx.buffer_pos[p_appdata->influx.read_buffer], 
+                 MSG_CONFIRM | MSG_DONTROUTE | MSG_DONTWAIT, 
+                 (struct sockaddr *)&p_appdata->influx.addr, 
+                 sizeof(p_appdata->influx.addr)
+         ) < 0)
+         printf("influx udp socket sendto error %d!\n", errno);
+*/
+      if (send(p_appdata->influx.socket, 
+               p_appdata->influx.buffer[p_appdata->influx.read_buffer], 
+               p_appdata->influx.buffer_pos[p_appdata->influx.read_buffer], 
+               MSG_CONFIRM | MSG_DONTROUTE | MSG_DONTWAIT
+         ) < 0)
+         printf("influx udp socket send error %d!\n", errno);
+      if (p_appdata->influx.read_buffer == INFLUX_BUFFER_COUNT - 1)
+         p_appdata->influx.read_buffer = 0;
+      else
+         (p_appdata->influx.read_buffer)++;
+
+      gettimeofday(&tv, NULL);
+      timestamp_finish = tv.tv_sec * 1000000LL + tv.tv_usec;
+      collect_stats(&p_appdata->stats_influx, timestamp_finish - timestamp_start);
+   }
+}
+
+#ifdef INFLUX_SUBMIT_THREAD
 void influx_main(void * arg)
 {
    app_data_t     *p_appdata;
    uint32_t       mask = EVENT_READY_FOR_SUBMIT;
    uint32_t       flags = 0;
 
-   struct timeval tv;
-   int64_t        timestamp_start;
-   int64_t        timestamp_finish;
-
    p_appdata = (app_data_t*)arg;
-   
    for (;;)
    {
       os_event_wait(p_appdata->main_events, mask, &flags, OS_WAIT_FOREVER);
       if (flags & EVENT_READY_FOR_SUBMIT)
       {
          os_event_clr(p_appdata->main_events, EVENT_READY_FOR_SUBMIT); /* Re-arm */
-		 while (p_appdata->influx.read_buffer != p_appdata->influx.write_buffer) {
-            gettimeofday(&tv, NULL);
-            timestamp_start = tv.tv_sec * 1000000LL + tv.tv_usec;
-
-			sendto(p_appdata->influx.socket, p_appdata->influx.buffer[p_appdata->influx.read_buffer], p_appdata->influx.buffer_pos[p_appdata->influx.read_buffer], 0, (struct sockaddr *)&p_appdata->influx.addr, sizeof(p_appdata->influx.addr));
-            if (p_appdata->influx.read_buffer == INFLUX_BUFFER_COUNT - 1)
-               p_appdata->influx.read_buffer = 0;
-	        else
-               (p_appdata->influx.read_buffer)++;
-
-            gettimeofday(&tv, NULL);
-            timestamp_finish = tv.tv_sec * 1000000LL + tv.tv_usec;
-            collect_stats(&p_appdata->stats_influx, timestamp_finish - timestamp_start);
-		 }
+         influx_submit(p_appdata);
       }
    }
 }
+#endif
 
-void influx_enqueue_core(app_data_t *p_appdata, char* point, uint32_t point_pos)
+void influx_push_core(app_data_t *p_appdata, char* point, uint32_t point_pos)
 {
    if (p_appdata->influx.buffer_pos[p_appdata->influx.write_buffer] + point_pos > p_appdata->influx.max_packet_size) {
-	  if (p_appdata->influx.write_buffer == INFLUX_BUFFER_COUNT - 1)
+      if (p_appdata->influx.write_buffer == INFLUX_BUFFER_COUNT - 1)
          p_appdata->influx.write_buffer = 0;
-	  else
+      else
          (p_appdata->influx.write_buffer)++;
-	  if (p_appdata->influx.write_buffer == p_appdata->influx.read_buffer)
+      if (p_appdata->influx.write_buffer == p_appdata->influx.read_buffer)
          printf("Influx buffer overrun!\n");
       p_appdata->influx.buffer_pos[p_appdata->influx.write_buffer] = 0;
+#ifdef INFLUX_SUBMIT_THREAD
       os_event_set(p_appdata->main_events, EVENT_READY_FOR_SUBMIT);
+#else
+      influx_submit(p_appdata);
+#endif
    }
    memcpy(&p_appdata->influx.buffer[p_appdata->influx.write_buffer][p_appdata->influx.buffer_pos[p_appdata->influx.write_buffer]], point, point_pos);
    p_appdata->influx.buffer_pos[p_appdata->influx.write_buffer] += point_pos;
    if (p_appdata->arguments.verbosity > 1)
-      printf("Influx Enqueue new pos: %ls\n", p_appdata->influx.buffer_pos);
+      printf("Influx push new pos: %ls\n", p_appdata->influx.buffer_pos);
 }
 
-void influx_enqueue_raw(app_data_t *p_appdata, char* measurement, char* value, int64_t timestamp)
+void influx_push_raw(app_data_t *p_appdata, char* measurement, char* value, int64_t timestamp)
 {
    static char     point[1000];
    static uint32_t point_pos;
    if (p_appdata->arguments.verbosity > 1)
-      printf("Influx Enqueue Raw: %s -> %s\n", measurement, value);
+      printf("Influx push Raw: %s -> %s\n", measurement, value);
    point_pos = 0;
    point_pos += sprintf(&point[point_pos], "%s", measurement);
    point_pos += sprintf(&point[point_pos], ",ControllerName=%s", p_appdata->arguments.controller_name);
    point_pos += sprintf(&point[point_pos], ",ProgramName=%s", p_appdata->arguments.program_name);
    point_pos += sprintf(&point[point_pos], " value=%s", value);
    point_pos += sprintf(&point[point_pos], " %ld\n", timestamp);
-   influx_enqueue_core(p_appdata, point, point_pos);
+   influx_push_core(p_appdata, point, point_pos);
 }
 
-void influx_enqueue(app_data_t *p_appdata, char* var_type, uint8_t slot, uint16_t var_index, char* value, int64_t timestamp)
+void influx_set_state(app_data_t *p_appdata) {
+   p_appdata->influx.state_len = 0;
+   for (uint8_t i = 0; i < p_appdata->state_tag_count; i++)
+      p_appdata->influx.state_len += sprintf(&p_appdata->influx.state[p_appdata->influx.state_len], ",%s=%s", p_appdata->state_names[i], p_appdata->state_values);
+}
+
+void influx_push(app_data_t *p_appdata, char* var_type, uint8_t slot, uint16_t var_index, char* value, int64_t timestamp)
 {
    static char     point[1000];
    static uint32_t point_pos;
 
-   struct timeval tv;
-   int64_t        timestamp_start;
-   int64_t        timestamp_finish;
+//   struct timeval tv;
+//   int64_t        timestamp_start;
+//   int64_t        timestamp_finish;
 
-   gettimeofday(&tv, NULL);
-   timestamp_start = tv.tv_sec * 1000000LL + tv.tv_usec;
+//   gettimeofday(&tv, NULL);
+//   timestamp_start = tv.tv_sec * 1000000LL + tv.tv_usec;
+
+//if ((slot == 3) && (var_index == 0)) {
 
    if (p_appdata->arguments.verbosity > 1)
-      printf("Influx Enqueue: %s / %d / %d -> %s\n", var_type, slot, var_index, value);
+      printf("Influx push: %s / %d / %d -> %s\n", var_type, slot, var_index, value);
+
+   // ToDo: get reference name and fixed part based on slot and index
+   static char refname[200];
+   sprintf(refname, "%s%s_%hhu_%hu", p_appdata->arguments.prefix, var_type, slot, var_index);
+   for (uint8_t i = 0; i < p_appdata->state_tag_count; i++) {
+      // ToDo: compare slot/var_index instead of name to improve performance
+      if (strcmp(refname, p_appdata->state_tags[i]) == 0) {
+         strcpy(p_appdata->state_values[i], value);
+         influx_set_state(p_appdata);
+         break;
+      }
+   }
+
    point_pos = 0;
-   point_pos += sprintf(&point[point_pos], "%s%s_%hhu_%hu", p_appdata->arguments.prefix, var_type, slot, var_index);
-   // point_pos += sprintf(&point[point_pos], ",ControllerName=%s", p_appdata->arguments.controller_name);
-   point_pos += sprintf(&point[point_pos], ",DataType=%s", var_type);
-   // point_pos += sprintf(&point[point_pos], ",Global1=%s", "0");
-   // point_pos += sprintf(&point[point_pos], ",Global2=%s", "0");
-   // point_pos += sprintf(&point[point_pos], ",LineMode=%s", "0");
-   // point_pos += sprintf(&point[point_pos], ",LineName=%s", p_appdata->arguments.line_name);
-   point_pos += sprintf(&point[point_pos], ",LineState=%s", "0");
-   // point_pos += sprintf(&point[point_pos], ",ProgramName=%s", p_appdata->arguments.program_name);
-   point_pos += sprintf(&point[point_pos], ",ReferenceName=%s%s_%hhu_%hu", p_appdata->arguments.prefix, var_type, slot, var_index);
-   point_pos += sprintf(&point[point_pos], ",TagDescription=%s%s_%hhu_%hu", p_appdata->arguments.prefix, var_type, slot, var_index);
-   // point_pos += sprintf(&point[point_pos], ",TimeShift1=%s", "0");
-   // point_pos += sprintf(&point[point_pos], ",TimeShift2=%s", "0");
-   // point_pos += sprintf(&point[point_pos], ",UserFilter1=%s", "Reserved1");
-   // point_pos += sprintf(&point[point_pos], ",UserFilter2=%s", "Reserved2");
+   point_pos += sprintf(&point[point_pos], "%s", refname);
+   memcpy(&point[point_pos], p_appdata->influx.common, p_appdata->influx.common_len);
+   point_pos += p_appdata->influx.common_len;
    memcpy(&point[point_pos], p_appdata->influx.fixed, p_appdata->influx.fixed_len);
    point_pos += p_appdata->influx.fixed_len;
+   memcpy(&point[point_pos], p_appdata->influx.state, p_appdata->influx.state_len);
+   point_pos += p_appdata->influx.state_len;
    point_pos += sprintf(&point[point_pos], " value=%s", value);
    point_pos += sprintf(&point[point_pos], " %ld\n", timestamp);
-   influx_enqueue_core(p_appdata, point, point_pos);
 
-   gettimeofday(&tv, NULL);
-   timestamp_finish = tv.tv_sec * 1000000LL + tv.tv_usec;
-   collect_stats(&p_appdata->stats_influx_enqueue, timestamp_finish - timestamp_start);
+   influx_push_core(p_appdata, point, point_pos);
+
+//}
+
+//   gettimeofday(&tv, NULL);
+//   timestamp_finish = tv.tv_sec * 1000000LL + tv.tv_usec;
+//   collect_stats(&p_appdata->stats_influx_push, timestamp_finish - timestamp_start);
 }
+#endif
 
+#ifdef ZMQ_PERSIST
 void zmqp_init(app_data_t *p_appdata)
 {
    p_appdata->zmq.context = zmq_ctx_new();
@@ -1106,7 +1225,7 @@ void zmqp_init(app_data_t *p_appdata)
    zmq_bind(p_appdata->zmq.pub, "tcp:/" "/" "*:5555");  // separate strings only to avoid misinterpretation as comment in some editors
 }
 
-void zmqp_enqueue_raw(app_data_t *p_appdata, char* measurement, char* value, int64_t timestamp)
+void zmqp_push_raw(app_data_t *p_appdata, char* measurement, char* value, int64_t timestamp)
 {
    static char     zmq_topic[100];
    static uint32_t zmq_topic_pos;
@@ -1127,7 +1246,7 @@ void zmqp_enqueue_raw(app_data_t *p_appdata, char* measurement, char* value, int
    zmq_send(p_appdata->zmq.pub, zmq_point, zmq_point_pos, 0);
 }
 
-void zmqp_enqueue(app_data_t *p_appdata, char* var_type, uint8_t slot, uint16_t var_index, char* value, int64_t timestamp)
+void zmqp_push(app_data_t *p_appdata, char* var_type, uint8_t slot, uint16_t var_index, char* value, int64_t timestamp)
 {
    static char     zmq_topic[100];
    static uint32_t zmq_topic_pos;
@@ -1168,31 +1287,44 @@ void zmqp_enqueue(app_data_t *p_appdata, char* var_type, uint8_t slot, uint16_t 
 
    gettimeofday(&tv, NULL);
    timestamp_finish = tv.tv_sec * 1000000LL + tv.tv_usec;
-   collect_stats(&p_appdata->stats_zmq_enqueue, timestamp_finish - timestamp_start);
+   collect_stats(&p_appdata->stats_zmq_push, timestamp_finish - timestamp_start);
 }
+#endif
 
-void enqueue_init(app_data_t *p_appdata)
+void push_init(app_data_t *p_appdata)
 {
+#ifdef INFLUX_PERSIST
    if (p_appdata->influx.port > 0)
       influx_init(p_appdata);
+#endif
+#ifdef ZMQ_PERSIST
    if (p_appdata->zmq.port > 0)
       zmqp_init(p_appdata);
+#endif
 }
 
-void enqueue_raw(app_data_t *p_appdata, char* measurement, char* value, int64_t timestamp)
+void push_raw(app_data_t *p_appdata, char* measurement, char* value, int64_t timestamp)
 {
+#ifdef INFLUX_PERSIST
    if (p_appdata->influx.port > 0)
-      influx_enqueue_raw(p_appdata, measurement, value, timestamp);
+      influx_push_raw(p_appdata, measurement, value, timestamp);
+#endif
+#ifdef ZMQ_PERSIST
    if (p_appdata->zmq.port > 0)
-      zmqp_enqueue_raw(p_appdata, measurement, value, timestamp);
+      zmqp_push_raw(p_appdata, measurement, value, timestamp);
+#endif
 }
 
-void enqueue(app_data_t *p_appdata, char* var_type, uint8_t slot, uint16_t var_index, char* value, int64_t timestamp)
+void push(app_data_t *p_appdata, char* var_type, uint8_t slot, uint16_t var_index, char* value, int64_t timestamp)
 {
+#ifdef INFLUX_PERSIST
    if (p_appdata->influx.port > 0)
-      influx_enqueue(p_appdata, var_type, slot, var_index, value, timestamp);
+      influx_push(p_appdata, var_type, slot, var_index, value, timestamp);
+#endif
+#ifdef ZMQ_PERSIST
    if (p_appdata->zmq.port > 0)
-      zmqp_enqueue(p_appdata, var_type, slot, var_index, value, timestamp);
+      zmqp_push(p_appdata, var_type, slot, var_index, value, timestamp);
+#endif
 }
 
 void pn_main(void * arg)
@@ -1218,14 +1350,16 @@ void pn_main(void * arg)
    struct timeval tv;
    int64_t        timestamp;
    int64_t        timestamp_last;
-   time_t         last_stats;
+   int64_t        last_stats;
 
    appdata_and_stack = (app_data_and_stack_t*)arg;
    p_appdata = appdata_and_stack->appdata;
    net = appdata_and_stack->net;
 
    printf("Connecting to Historian\n");
-//   enqueue_init(p_appdata);
+#ifndef INFLUX_SUBMIT_THREAD
+   push_init(p_appdata);
+#endif
 
    printf("Waiting for connect request from IO-controller\n");
 
@@ -1281,13 +1415,18 @@ void pn_main(void * arg)
             timestamp = tv.tv_sec * 1000000LL + tv.tv_usec;
 
             // persist and reset stats every 10 seconds
-            if (tv.tv_sec - last_stats > 10) {
-			   persist_stats(p_appdata, &p_appdata->stats_interval, "interval", timestamp);
-			   persist_stats(p_appdata, &p_appdata->stats_duration, "duration", timestamp);
-			   persist_stats(p_appdata, &p_appdata->stats_influx, "influx_persist", timestamp);
-			   persist_stats(p_appdata, &p_appdata->stats_influx_enqueue, "influx_enqueue", timestamp);
-			   persist_stats(p_appdata, &p_appdata->stats_zmq_enqueue, "zmq_enqueue", timestamp);
-               last_stats = tv.tv_sec;
+            if (timestamp - last_stats >= 10000000) {
+			      persist_stats(p_appdata, &p_appdata->stats_interval, "interval", timestamp);
+			      persist_stats(p_appdata, &p_appdata->stats_duration, "duration", timestamp);
+#ifdef INFLUX_PERSIST
+		   	   persist_stats(p_appdata, &p_appdata->stats_influx, "influx_persist", timestamp);
+//	   		   persist_stats(p_appdata, &p_appdata->stats_influx_push, "influx_push", timestamp);
+#endif
+#ifdef ZMQ_PERSIST
+//   			   persist_stats(p_appdata, &p_appdata->stats_zmq_push, "zmq_push", timestamp);
+#endif
+
+               last_stats = timestamp;
             }
 
             if (timestamp_last > 0)
@@ -1316,7 +1455,11 @@ void pn_main(void * arg)
                      var_bytepos = 0;
                      var_bitmask = 0b00000001;
                      var_index = 0;
+#ifdef LIMIT_VOLUME
+                     while (var_bytepos < 1)
+#else
                      while (var_bytepos < cfg_available_submodule_types[slot_type_index].outsize)
+#endif
                      {
                         switch (cfg_available_submodule_types[slot_type_index].var_type)
                         {
@@ -1324,7 +1467,9 @@ void pn_main(void * arg)
                               if ((p_appdata->state[slot][var_bytepos] & var_bitmask) != (outputdata[var_bytepos] & var_bitmask))
                               {
                                  sprintf(value_str, "%hhu", (outputdata[var_bytepos] & var_bitmask) > 0 ? 1 : 0);
-                                 enqueue(p_appdata, "b", slot, var_index, value_str, timestamp);
+#ifndef LIMIT_VOLUME
+                                 push(p_appdata, "b", slot, var_index, value_str, timestamp);
+#endif
                                  if (p_appdata->arguments.verbosity > 1)
                                     printf("Changing b_%d_%d to %s\n", slot, var_index, value_str);
                               }
@@ -1340,7 +1485,7 @@ void pn_main(void * arg)
                               if (memcmp(&p_appdata->state[slot][var_bytepos], &outputdata[var_bytepos], var_bytelen) != 0) {
                                  // ToDo: complain if session endianness is not little endian
                                  sprintf(value_str, "%hhu", ((uint8_t *)&outputdata[var_bytepos])[0]);
-                                 enqueue(p_appdata, "u8", slot, var_index, value_str, timestamp);
+                                 push(p_appdata, "u8", slot, var_index, value_str, timestamp);
                                  if (p_appdata->arguments.verbosity > 1)
                                     printf("Changing u8_%d_%d to %s\n", slot, var_index, value_str);
                               }
@@ -1350,8 +1495,8 @@ void pn_main(void * arg)
                               var_bytelen = 2;
                               if (memcmp(&p_appdata->state[slot][var_bytepos], &outputdata[var_bytepos], var_bytelen) != 0) {
                                  // ToDo: complain if session endianness is not little endian
-                                 sprintf(value_str, "%hu", ((uint16_t *)&outputdata[var_bytepos])[0]);
-                                 enqueue(p_appdata, "u16", slot, var_index, value_str, timestamp);
+                                 sprintf(value_str, "%hu", ntohs(((uint16_t *)&outputdata[var_bytepos])[0]));
+                                 push(p_appdata, "u16", slot, var_index, value_str, timestamp);
                                  if (p_appdata->arguments.verbosity > 1)
                                     printf("Changing u16_%d_%d to %s\n", slot, var_index, value_str);
                               }
@@ -1361,8 +1506,8 @@ void pn_main(void * arg)
                               var_bytelen = 4;
                               if (memcmp(&p_appdata->state[slot][var_bytepos], &outputdata[var_bytepos], var_bytelen) != 0) {
                                  // ToDo: complain if session endianness is not little endian
-                                 sprintf(value_str, "%u", ((uint32_t *)&outputdata[var_bytepos])[0]);
-                                 enqueue(p_appdata, "u32", slot, var_index, value_str, timestamp);
+                                 sprintf(value_str, "%u", ntohl(((uint32_t *)&outputdata[var_bytepos])[0]));
+                                 push(p_appdata, "u32", slot, var_index, value_str, timestamp);
                                  if (p_appdata->arguments.verbosity > 1)
                                     printf("Changing u32_%d_%d to %s\n", slot, var_index, value_str);
                               }
@@ -1372,8 +1517,9 @@ void pn_main(void * arg)
                               var_bytelen = 8;
                               if (memcmp(&p_appdata->state[slot][var_bytepos], &outputdata[var_bytepos], var_bytelen) != 0) {
                                  // ToDo: complain if session endianness is not little endian
-                                 sprintf(value_str, "%lu", ((uint64_t *)&outputdata[var_bytepos])[0]);
-                                 enqueue(p_appdata, "u64", slot, var_index, value_str, timestamp);
+                                 // ToDo: implement ntohll for 64bit values !!!!!
+                                 sprintf(value_str, "%lu", ntohl(((uint64_t *)&outputdata[var_bytepos])[0]));
+                                 push(p_appdata, "u64", slot, var_index, value_str, timestamp);
                                  if (p_appdata->arguments.verbosity > 1)
                                     printf("Changing u64_%d_%d to %s\n", slot, var_index, value_str);
                               }
@@ -1384,7 +1530,7 @@ void pn_main(void * arg)
                               if (memcmp(&p_appdata->state[slot][var_bytepos], &outputdata[var_bytepos], var_bytelen) != 0) {
                                  // ToDo: complain if session endianness is not little endian
                                  sprintf(value_str, "%hhi", ((int8_t *)&outputdata[var_bytepos])[0]);
-                                 enqueue(p_appdata, "i8", slot, var_index, value_str, timestamp);
+                                 push(p_appdata, "i8", slot, var_index, value_str, timestamp);
                                  if (p_appdata->arguments.verbosity > 1)
                                     printf("Changing i8_%d_%d to %s\n", slot, var_index, value_str);
                               }
@@ -1394,8 +1540,8 @@ void pn_main(void * arg)
                               var_bytelen = 2;
                               if (memcmp(&p_appdata->state[slot][var_bytepos], &outputdata[var_bytepos], var_bytelen) != 0) {
                                  // ToDo: complain if session endianness is not little endian
-                                 sprintf(value_str, "%hi", ((int16_t *)&outputdata[var_bytepos])[0]);
-                                 enqueue(p_appdata, "i16", slot, var_index, value_str, timestamp);
+                                 sprintf(value_str, "%hi", ntohs(((int16_t *)&outputdata[var_bytepos])[0]));
+                                 push(p_appdata, "i16", slot, var_index, value_str, timestamp);
                                  if (p_appdata->arguments.verbosity > 1)
                                     printf("Changing i16_%d_%d to %s\n", slot, var_index, value_str);
                               }
@@ -1405,8 +1551,8 @@ void pn_main(void * arg)
                               var_bytelen = 4;
                               if (memcmp(&p_appdata->state[slot][var_bytepos], &outputdata[var_bytepos], var_bytelen) != 0) {
                                  // ToDo: complain if session endianness is not little endian
-                                 sprintf(value_str, "%i", ((int32_t *)&outputdata[var_bytepos])[0]);
-                                 enqueue(p_appdata, "i32", slot, var_index, value_str, timestamp);
+                                 sprintf(value_str, "%i", ntohl(((int32_t *)&outputdata[var_bytepos])[0]));
+                                 push(p_appdata, "i32", slot, var_index, value_str, timestamp);
                                  if (p_appdata->arguments.verbosity > 1)
                                     printf("Changing i32_%d_%d to %s\n", slot, var_index, value_str);
                               }
@@ -1416,8 +1562,9 @@ void pn_main(void * arg)
                               var_bytelen = 8;
                               if (memcmp(&p_appdata->state[slot][var_bytepos], &outputdata[var_bytepos], var_bytelen) != 0) {
                                  // ToDo: complain if session endianness is not little endian
-                                 sprintf(value_str, "%li", ((int64_t *)&outputdata[var_bytepos])[0]);
-                                 enqueue(p_appdata, "i64", slot, var_index, value_str, timestamp);
+                                 // ToDo: implement ntohll for 64bit values !!!!!
+                                 sprintf(value_str, "%li", ntohl(((int64_t *)&outputdata[var_bytepos])[0]));
+                                 push(p_appdata, "i64", slot, var_index, value_str, timestamp);
                                  if (p_appdata->arguments.verbosity > 1)
                                     printf("Changing i64_%d_%d to %s\n", slot, var_index, value_str);
                               }
@@ -1427,9 +1574,9 @@ void pn_main(void * arg)
                               var_bytelen = 4;
                               if (memcmp(&p_appdata->state[slot][var_bytepos], &outputdata[var_bytepos], var_bytelen) != 0) {
                                  // ToDo: complain if session floating point representation is not IEEE
-                                 uint32_t temp = htonl(((uint32_t *)&outputdata[var_bytepos])[0]);
+                                 uint32_t temp = ntohl(((uint32_t *)&outputdata[var_bytepos])[0]);
                                  sprintf(value_str, "%f", *(float*)&temp);
-                                 enqueue(p_appdata, "f32", slot, var_index, value_str, timestamp);
+                                 push(p_appdata, "f32", slot, var_index, value_str, timestamp);
                                  if (p_appdata->arguments.verbosity > 1)
                                     printf("Changing f32_%d_%d to %s\n", slot, var_index, value_str);
                               }
@@ -1439,9 +1586,10 @@ void pn_main(void * arg)
                               var_bytelen = 8;
                               if (memcmp(&p_appdata->state[slot][var_bytepos], &outputdata[var_bytepos], var_bytelen) != 0) {
                                  // ToDo: complain if session floating point representation is not IEEE
-                                 uint64_t temp = htonl(((uint64_t *)&outputdata[var_bytepos])[0]);
+                                 // ToDo: implement ntohll for 64bit values !!!!!
+                                 uint64_t temp = ntohl(((uint64_t *)&outputdata[var_bytepos])[0]);
                                  sprintf(value_str, "%lf", *(double*)&temp);
-                                 enqueue(p_appdata, "f64", slot, var_index, value_str, timestamp);
+                                 push(p_appdata, "f64", slot, var_index, value_str, timestamp);
                                  if (p_appdata->arguments.verbosity > 1)
                                     printf("Changing f64_%d_%d to %s\n", slot, var_index, value_str);
                               }
@@ -1456,8 +1604,6 @@ void pn_main(void * arg)
                      memcpy(p_appdata->state[slot], &outputdata, cfg_available_submodule_types[slot_type_index].outsize);
                   }
                }
-			   
-               gettimeofday(&tv, NULL);
             }
 
             timestamp_last = timestamp;
@@ -1517,6 +1663,18 @@ int main(int argc, char *argv[])
    memset(appdata.state, 0, sizeof(appdata.state));
    memset(appdata.custom_modules, 0, sizeof(appdata.custom_modules));
 
+//   strcpy(appdata.line_mode, "0");
+//   strcpy(appdata.line_state, "0");
+
+   appdata.state_tag_count = 2;
+   strcpy(appdata.state_names[0], "LineMode");
+   strcpy(appdata.state_tags[0], "lc2_f32_2_8");
+   strcpy(appdata.state_values[0], "0");
+   strcpy(appdata.state_names[1], "LineState");
+   strcpy(appdata.state_tags[1], "lc2_f32_2_9");
+   strcpy(appdata.state_values[1], "0");
+
+
 #ifdef PROFILING
    signal(SIGINT, SigIntHandler);
 #endif
@@ -1533,9 +1691,13 @@ int main(int argc, char *argv[])
    printf("Line name:          %s\n", appdata.arguments.line_name);
    printf("Controller name:    %s\n", appdata.arguments.controller_name);
    printf("Program name:       %s\n", appdata.arguments.program_name);
+#ifdef INFLUX_PERSIST
    printf("Influx host:        %s\n", appdata.influx.host);
    printf("Influx port:        %d\n", appdata.influx.port);
+#endif
+#ifdef ZMQ_PERSIST
    printf("0MQ port:           %d\n", appdata.zmq.port);
+#endif
    printf("Prefix:             %s\n", appdata.arguments.prefix);
 
    /* Read IP, netmask, gateway and MAC address from operating system */
@@ -1607,8 +1769,7 @@ int main(int argc, char *argv[])
    memcpy(pnet_default_cfg.eth_addr.addr, macbuffer, 6);
    pnet_default_cfg.cb_arg = (void*) &appdata;
    strcpy(pnet_default_cfg.station_name, appdata.arguments.station_name);
-   appdata.influx.max_packet_size = lo_mtu - 14 - 8; // 14 byte ethernet and 8 byte udp overhead
-
+   appdata.influx.max_packet_size = INFLUX_BUFFER_SIZE < lo_mtu - 14 - 20 - 8 ? INFLUX_BUFFER_SIZE : lo_mtu - 14 - 20 - 8; // header: 14 byte ethernet, 20 byte ip, 8 byte udp
 
    /* Initialize profinet stack */
    net = pnet_init(appdata.arguments.eth_interface, TICK_INTERVAL_US, &pnet_default_cfg);
@@ -1627,14 +1788,19 @@ int main(int argc, char *argv[])
    os_timer_start(appdata.main_timer);
 
    /* Initialize influx persistance */
-   enqueue_init(&appdata);
+#ifdef INFLUX_SUBMIT_THREAD
+   push_init(&appdata);
    os_thread_create("influx_main", INFLUX_PRIORITY, INFLUX_STACKSIZE, influx_main, (void*)&appdata);
+#endif
 
-   for(;;)
-//   for(uint8_t i = 0; i < 12; i++) {
-//      printf("main %d\n", i);
-      os_usleep(APP_MAIN_SLEEPTIME_US);
-//   }
-
+   if (appdata.arguments.runtime == 0) {
+      for(;;)
+         os_usleep(APP_MAIN_SLEEPTIME_US);
+   } else {
+      uint64_t loops = (appdata.arguments.runtime * 1000 * 1000) / (APP_MAIN_SLEEPTIME_US);
+      printf("Runtime limited to %lds (%ld loops)!\n", appdata.arguments.runtime, loops);
+      for(uint64_t l = 0; l < loops; l++)
+         os_usleep(APP_MAIN_SLEEPTIME_US);
+   }
    return 0;
 }
